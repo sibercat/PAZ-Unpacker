@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<setting />
+<language>
+  <LANG_ID_0>PAZ Unpacker</LANG_ID_0>
+  <LANG_ID_1>PAZ Unpacker - %s</LANG_ID_1>
+  <LANG_ID_2>Idle</LANG_ID_2>
+  <LANG_ID_3>Busy</LANG_ID_3>
+  <LANG_ID_4>Select paz folder</LANG_ID_4>
+  <LANG_ID_5>Select folder to save file(s)</LANG_ID_5>
+  <LANG_ID_6>pad00000.meta doesn't exists</LANG_ID_6>
+  <LANG_ID_7>Alert</LANG_ID_7>
+  <LANG_ID_8>Error</LANG_ID_8>
+  <LANG_ID_9>Version: %d
+PAZ file no.: %d
+Size: %s</LANG_ID_9>
+  <LANG_ID_10>Name: %S
+Size: %s
+Paz file: %s
+Path: %S</LANG_ID_10>
+  <LANG_ID_11>Name: %S
+Size: %s</LANG_ID_11>
+  <LANG_ID_12>(1/4) Processing %d/%d...</LANG_ID_12>
+  <LANG_ID_13>(2/4) Sorting...</LANG_ID_13>
+  <LANG_ID_14>(3/4) Calculate capacities...</LANG_ID_14>
+  <LANG_ID_15>(4/4) Adding data to tree...</LANG_ID_15>
+  <LANG_ID_16>(%d/%d) Extracting...</LANG_ID_16>
+  <LANG_ID_17></LANG_ID_17>
+  <LANG_ID_18>Fail to create directory</LANG_ID_18>
+  <LANG_ID_19>Open</LANG_ID_19>
+  <LANG_ID_20>Extract</LANG_ID_20>
+  <LANG_ID_21>(%d/%d) Adding data to tree...</LANG_ID_21>
+</language>
