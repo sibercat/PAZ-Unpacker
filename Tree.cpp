@@ -186,6 +186,23 @@ namespace kukdh1 {
     return vChildFolders.size();
   }
 
+  void Tree::GetFileNodeList(std::vector<Tree*> &vList) {
+    if (ttType == TREE_TYPE_FILE) {
+      vList.push_back(this);
+    }
+    else {
+      for (auto &child : vChildFolders) child->GetFileNodeList(vList);
+      for (auto &child : vChildFiles)   child->GetFileNodeList(vList);
+    }
+  }
+
+  void Tree::ResetAdded() {
+    bAdded = FALSE;
+    hThis  = nullptr;
+    for (auto &child : vChildFolders) child->ResetAdded();
+    for (auto &child : vChildFiles)   child->ResetAdded();
+  }
+
   void Tree::GetFileList(std::vector<kukdh1::FileInfo> &vList) {
     if (ttType == TREE_TYPE_FILE) {
       vList.push_back(fiFileInfo);
