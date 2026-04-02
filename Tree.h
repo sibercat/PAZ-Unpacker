@@ -61,6 +61,8 @@ namespace kukdh1 {
       size_t GetFolderCount();
       Tree *GetChildFolderWithName(std::string name);
       void GetFileList(std::vector<kukdh1::FileInfo> &vList);
+      void GetFileNodeList(std::vector<Tree*> &vList);
+      void ResetAdded();
   };
 }
 
