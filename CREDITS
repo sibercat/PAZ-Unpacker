@@ -1,0 +1,27 @@
+CREDITS
+=======
+
+Original Project
+----------------
+  Name:    PAZ Unpacker
+  Author:  kukdh1
+  URL:     https://github.com/kukdh1/PAZ-Unpacker
+  Year:    2015
+
+  All original design, reverse engineering of the PAZ file format, ICE cipher
+  implementation, and core application architecture are the work of kukdh1.
+  This fork would not exist without that foundational work.
+
+Third-party Libraries
+---------------------
+  pugixml  — Fast XML parser for C++
+  Author:  Arseny Kapoulkine
+  URL:     https://pugixml.org
+  License: MIT
+
+This Fork
+---------
+  Maintainer:  sibercat (https://github.com/sibercat)
+  Based on:    kukdh1/PAZ-Unpacker (commit history preserved where possible)
+
+  Changes made in this fork are documented in README.md.

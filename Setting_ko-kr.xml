@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<setting>
+  <last_folder_path>D:\Black Desert\paz</last_folder_path>
+  <last_extract_path>D:\Extracted</last_extract_path>
+</setting>
+<language>
+  <LANG_ID_0>PAZ Unpacker</LANG_ID_0>
+  <LANG_ID_1>PAZ Unpacker - %s</LANG_ID_1>
+  <LANG_ID_2>대기중</LANG_ID_2>
+  <LANG_ID_3>작업중</LANG_ID_3>
+  <LANG_ID_4>paz 폴더를 선택해주세요</LANG_ID_4>
+  <LANG_ID_5>파일을 저장할 폴더를 선택해주세요</LANG_ID_5>
+  <LANG_ID_6>pad00000.meta 파일이 존재하지 않습니다</LANG_ID_6>
+  <LANG_ID_7>알림</LANG_ID_7>
+  <LANG_ID_8>에러</LANG_ID_8>
+  <LANG_ID_9>버전: %d
+PAZ 파일 개수: %d
+용량: %s</LANG_ID_9>
+  <LANG_ID_10>이름: %S
+용량: %s
+Paz 파일 주소: %s
+내부 주소: %S</LANG_ID_10>
+  <LANG_ID_11>이름: %S
+용량: %s</LANG_ID_11>
+  <LANG_ID_12>(1/4) %d/%d 처리중...</LANG_ID_12>
+  <LANG_ID_13>(2/4) 정렬중...</LANG_ID_13>
+  <LANG_ID_14>(3/4) 용량 계산중...</LANG_ID_14>
+  <LANG_ID_15>(4/4) 트리에 데이터 추가중...</LANG_ID_15>
+  <LANG_ID_16>(%d/%d) 추출중...</LANG_ID_16>
+  <LANG_ID_17 />
+  <LANG_ID_18>폴더 생성 실패</LANG_ID_18>
+  <LANG_ID_19>열기</LANG_ID_19>
+  <LANG_ID_20>추출</LANG_ID_20>
+  <LANG_ID_21>(%d/%d) 트리에 데이터 추가중...</LANG_ID_21>
+</language>
