@@ -149,8 +149,8 @@ BOOL Cls_OnCreate(HWND hWnd, LPCREATESTRUCT lpCreateStruct) {
   app.hSearchEdit = CreateWindow(WC_EDIT, nullptr,
     WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
     0, 0, 0, 0, hWnd, (HMENU)ID_EDIT_SEARCH, lpCreateStruct->hInstance, nullptr);
-  // Placeholder-style hint text (grey, cleared on focus via EN_SETFOCUS if desired)
-  SetWindowText(app.hSearchEdit, L"Search...");
+  // Native placeholder text — never affects actual content, disappears on focus
+  SendMessage(app.hSearchEdit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Search files...");
 
   // ── Extension filter checkboxes ────────────────────────────────────────────
   for (int i = 0; i < EXT_FILTER_COUNT; i++) {
@@ -270,7 +270,7 @@ void Cls_OnCommand(HWND hWnd, int id, HWND hwndCtl, UINT codeNotify) {
 
           // Reset search state
           app.bSearchMode = false;
-          SetWindowText(app.hSearchEdit, L"Search...");
+          SetWindowText(app.hSearchEdit, L"");
           for (int i = 0; i < EXT_FILTER_COUNT; i++)
             SendMessage(app.hCheckboxes[i], BM_SETCHECK, BST_UNCHECKED, 0);
 
@@ -668,20 +668,95 @@ void RestoreNormalTree() {
     (LPARAM)app.CSetting.getString(kukdh1::Setting::ID_PROGRESS_READY).c_str());
 }
 
-void ApplySearchFilter() {
-  if (!app.CTree) return;
+// Result cap to prevent UI freeze on broad filters like .dds
+static constexpr size_t SEARCH_RESULT_CAP = 2000;
 
-  // ── Gather search text (skip placeholder) ─────────────────────────────────
+struct SearchParams {
+  std::string        narrowSearch;
+  std::vector<std::string> checkedExts;
+};
+
+DWORD WINAPI SearchThread(LPVOID arg) {
+  app.bBusy = true;
+  EnableWindow(app.hTreeFileSystem, FALSE);
+  EnableWindow(app.hButtonOpen,     FALSE);
+  EnableWindow(app.hButtonExctact,  FALSE);
+  SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Searching...");
+
+  auto *params = reinterpret_cast<SearchParams *>(arg);
+
+  // ── Collect all file nodes ────────────────────────────────────────────────
+  std::vector<kukdh1::Tree*> allFiles;
+  app.CTree->GetFileNodeList(allFiles);
+
+  // ── Filter ────────────────────────────────────────────────────────────────
+  std::vector<kukdh1::Tree*> matches;
+  matches.reserve(512);
+  size_t totalMatches = 0;
+
+  for (auto *node : allFiles) {
+    const std::string &fullPath = node->GetFileInfo().sFullPath;
+
+    // Extension filter
+    if (!params->checkedExts.empty()) {
+      size_t dot = fullPath.rfind('.');
+      std::string ext = (dot != std::string::npos) ? fullPath.substr(dot) : "";
+      std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+      if (std::find(params->checkedExts.begin(), params->checkedExts.end(), ext) == params->checkedExts.end()) continue;
+    }
+
+    // Text search (narrow, case-insensitive)
+    if (!params->narrowSearch.empty()) {
+      std::string lowerPath = fullPath;
+      std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::tolower);
+      if (lowerPath.find(params->narrowSearch) == std::string::npos) continue;
+    }
+
+    totalMatches++;
+    if (matches.size() < SEARCH_RESULT_CAP) matches.push_back(node);
+  }
+
+  delete params;
+
+  // ── Rebuild TreeView as flat list ─────────────────────────────────────────
+  app.bSearchMode = true;
+  SendMessage(app.hTreeFileSystem, WM_SETREDRAW, FALSE, 0);
+  TreeView_DeleteAllItems(app.hTreeFileSystem);
+
+  for (auto *node : matches) {
+    std::wstring widePath;
+    kukdh1::ConvertWidechar(node->GetFileInfo().sFullPath, widePath);
+    wchar_t label[512];
+    wcsncpy_s(label, widePath.c_str(), _countof(label) - 1);
+    kukdh1::AddTreeItem(app.hTreeFileSystem, nullptr, TVI_LAST, label, (LPARAM)node);
+  }
+
+  SendMessage(app.hTreeFileSystem, WM_SETREDRAW, TRUE, 0);
+  InvalidateRect(app.hTreeFileSystem, nullptr, TRUE);
+
+  WCHAR buf[128];
+  if (totalMatches > SEARCH_RESULT_CAP)
+    swprintf_s(buf, L"Showing %zu of %zu result(s) — refine your search", matches.size(), totalMatches);
+  else
+    swprintf_s(buf, L"%zu result(s)", totalMatches);
+  SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)buf);
+
+  EnableWindow(app.hButtonExctact, TRUE);
+  EnableWindow(app.hButtonOpen,    TRUE);
+  EnableWindow(app.hTreeFileSystem, TRUE);
+  app.bBusy = false;
+  return 0;
+}
+
+void ApplySearchFilter() {
+  if (!app.CTree || app.bBusy) return;
+
+  // ── Gather search text ────────────────────────────────────────────────────
   int len = GetWindowTextLength(app.hSearchEdit);
   std::wstring searchText(len + 1, L'\0');
   GetWindowText(app.hSearchEdit, searchText.data(), len + 1);
   searchText.resize(len);
-  if (searchText == L"Search...") searchText.clear();
   std::transform(searchText.begin(), searchText.end(), searchText.begin(), ::towlower);
-
-  // Narrow version for fast comparison against narrow sFullPath
-  std::string narrowSearch;
-  for (wchar_t c : searchText) narrowSearch += (char)c;
 
   // ── Gather checked extensions ─────────────────────────────────────────────
   std::vector<std::string> checkedExts;
@@ -700,54 +775,14 @@ void ApplySearchFilter() {
     return;
   }
 
-  // ── Collect all file nodes ────────────────────────────────────────────────
-  std::vector<kukdh1::Tree*> allFiles;
-  app.CTree->GetFileNodeList(allFiles);
+  // Build narrow search string
+  std::string narrowSearch;
+  for (wchar_t c : searchText) narrowSearch += (char)c;
 
-  // ── Filter ────────────────────────────────────────────────────────────────
-  std::vector<kukdh1::Tree*> matches;
-  matches.reserve(512);
-
-  for (auto *node : allFiles) {
-    const std::string &fullPath = node->GetFileInfo().sFullPath;
-
-    // Extension filter
-    if (!checkedExts.empty()) {
-      size_t dot = fullPath.rfind('.');
-      std::string ext = (dot != std::string::npos) ? fullPath.substr(dot) : "";
-      std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-      if (std::find(checkedExts.begin(), checkedExts.end(), ext) == checkedExts.end()) continue;
-    }
-
-    // Text search (narrow, case-insensitive)
-    if (!narrowSearch.empty()) {
-      std::string lowerPath = fullPath;
-      std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::tolower);
-      if (lowerPath.find(narrowSearch) == std::string::npos) continue;
-    }
-
-    matches.push_back(node);
-  }
-
-  // ── Rebuild TreeView as flat list ─────────────────────────────────────────
-  app.bSearchMode = true;
-  SendMessage(app.hTreeFileSystem, WM_SETREDRAW, FALSE, 0);
-  TreeView_DeleteAllItems(app.hTreeFileSystem);
-
-  for (auto *node : matches) {
-    std::wstring widePath;
-    kukdh1::ConvertWidechar(node->GetFileInfo().sFullPath, widePath);
-    wchar_t label[512];
-    wcsncpy_s(label, widePath.c_str(), _countof(label) - 1);
-    kukdh1::AddTreeItem(app.hTreeFileSystem, nullptr, TVI_LAST, label, (LPARAM)node);
-  }
-
-  SendMessage(app.hTreeFileSystem, WM_SETREDRAW, TRUE, 0);
-  InvalidateRect(app.hTreeFileSystem, nullptr, TRUE);
-
-  WCHAR buf[64];
-  swprintf_s(buf, L"%zu result(s)", matches.size());
-  SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)buf);
+  // Launch worker thread so UI stays responsive
+  auto *params = new SearchParams{ narrowSearch, checkedExts };
+  HANDLE hThread = CreateThread(nullptr, 0, SearchThread, params, 0, nullptr);
+  CloseHandle(hThread);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -756,17 +791,17 @@ void ApplySearchFilter() {
 HBITMAP LoadWICBitmap(const std::wstring &path, int maxW, int maxH) {
   if (!app.pWICFactory || maxW < 1 || maxH < 1) return nullptr;
 
-  IWICBitmapDecoder    *decoder   = nullptr;
-  IWICBitmapFrameDecode *frame    = nullptr;
-  IWICFormatConverter  *converter = nullptr;
-  IWICBitmapScaler     *scaler    = nullptr;
-  HBITMAP               hResult  = nullptr;
+  IWICBitmapDecoder     *decoder   = nullptr;
+  IWICBitmapFrameDecode *frame     = nullptr;
+  IWICFormatConverter   *converter = nullptr;
+  IWICBitmapScaler      *scaler    = nullptr;
+  HBITMAP                hResult  = nullptr;
 
   auto cleanup = [&]() {
-    if (scaler)    scaler->Release();
-    if (converter) converter->Release();
-    if (frame)     frame->Release();
-    if (decoder)   decoder->Release();
+    if (scaler)    { scaler->Release();    scaler    = nullptr; }
+    if (converter) { converter->Release(); converter = nullptr; }
+    if (frame)     { frame->Release();     frame     = nullptr; }
+    if (decoder)   { decoder->Release();   decoder   = nullptr; }
   };
 
   HRESULT hr = app.pWICFactory->CreateDecoderFromFilename(
@@ -778,6 +813,14 @@ HBITMAP LoadWICBitmap(const std::wstring &path, int maxW, int maxH) {
 
   hr = app.pWICFactory->CreateFormatConverter(&converter);
   if (FAILED(hr)) { cleanup(); return nullptr; }
+
+  // Try converting to 32bpp BGRA. Some DDS formats (BC6H float, etc.)
+  // can't convert directly — fall back to checking canConvert first.
+  BOOL canConvert = FALSE;
+  WICPixelFormatGUID srcFmt = {};
+  frame->GetPixelFormat(&srcFmt);
+  converter->CanConvert(srcFmt, GUID_WICPixelFormat32bppBGRA, &canConvert);
+  if (!canConvert) { cleanup(); return nullptr; }
 
   hr = converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA,
     WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
@@ -866,12 +909,22 @@ void UpdatePreview(kukdh1::Tree *pTree) {
   kukdh1::CryptICE cipher(ICE_KEY, ICE_KEY_LEN);
   bool ok = ExtractFile(tempPath, info, cipher);
 
-  if (ok) {
-    RECT rc;
-    GetClientRect(app.hPreviewPanel, &rc);
-    app.hPreviewBitmap = LoadWICBitmap(tempPath, rc.right - rc.left, rc.bottom - rc.top);
+  if (!ok) {
+    SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Preview: extraction failed");
+    InvalidateRect(app.hPreviewPanel, nullptr, TRUE);
+    return;
   }
 
+  RECT rc;
+  GetClientRect(app.hPreviewPanel, &rc);
+  app.hPreviewBitmap = LoadWICBitmap(tempPath, rc.right - rc.left, rc.bottom - rc.top);
   DeleteFile(tempPath.c_str());
+
+  if (!app.hPreviewBitmap) {
+    SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Preview: unsupported texture format");
+  }
+  else {
+    SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"");
+  }
   InvalidateRect(app.hPreviewPanel, nullptr, TRUE);
 }
