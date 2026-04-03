@@ -13,49 +13,40 @@ namespace kukdh1 {
     return TreeView_InsertItem(hTree, &tvis);
   }
 
-  int CALLBACK BrowseCallbackProc(HWND hwnd, UINT uMsg, LPARAM lParam, LPARAM lpData) {
-    switch (uMsg) {
-      case BFFM_INITIALIZED:
-        if (lpData != NULL) {
-          SendMessage(hwnd, BFFM_SETSELECTION, TRUE, (LPARAM)lpData);
-        }
-        break;
-     }
-
-    return 0;
-  }
-  
   BOOL BrowseFolder(HWND hParent, LPCWSTR szTitle, LPCWSTR szStartPath, std::wstring &outFolder) {
-    LPMALLOC pMalloc;
-    LPITEMIDLIST pidl;
-    BROWSEINFO bi = {};
-    WCHAR szBuffer[MAX_PATH] = {};
-
-    bi.hwndOwner = hParent;
-    bi.pidlRoot = nullptr;
-    bi.pszDisplayName = nullptr;
-    bi.lpszTitle = szTitle;
-    bi.ulFlags = BIF_NEWDIALOGSTYLE | BIF_RETURNONLYFSDIRS;
-    bi.lpfn = BrowseCallbackProc;
-    bi.lParam = (LPARAM)szStartPath;
-
-    pidl = SHBrowseForFolder(&bi);
-
-    if (pidl == nullptr) {
+    IFileOpenDialog *pfd = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pfd))))
       return FALSE;
+
+    DWORD dwOptions = 0;
+    pfd->GetOptions(&dwOptions);
+    pfd->SetOptions(dwOptions | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+    if (szTitle) pfd->SetTitle(szTitle);
+
+    if (szStartPath && szStartPath[0]) {
+      IShellItem *psi = nullptr;
+      if (SUCCEEDED(SHCreateItemFromParsingName(szStartPath, nullptr, IID_PPV_ARGS(&psi)))) {
+        pfd->SetFolder(psi);
+        psi->Release();
+      }
     }
 
-    SHGetPathFromIDListEx(pidl, szBuffer, MAX_PATH, GPFIDL_DEFAULT);
-    outFolder = szBuffer;
+    HRESULT hr = pfd->Show(hParent);
+    if (FAILED(hr)) { pfd->Release(); return FALSE; }
 
-    if (SHGetMalloc(&pMalloc) != NOERROR) {
-      return FALSE;
+    IShellItem *psiResult = nullptr;
+    hr = pfd->GetResult(&psiResult);
+    pfd->Release();
+    if (FAILED(hr)) return FALSE;
+
+    PWSTR pszPath = nullptr;
+    hr = psiResult->GetDisplayName(SIGDN_FILESYSPATH, &pszPath);
+    psiResult->Release();
+    if (SUCCEEDED(hr)) {
+      outFolder = pszPath;
+      CoTaskMemFree(pszPath);
     }
-
-    pMalloc->Free(pidl);
-    pMalloc->Release();
-
-    return TRUE;
+    return SUCCEEDED(hr) ? TRUE : FALSE;
   }
 
   void ParsePath(std::string path, std::vector<std::string> &folders) {

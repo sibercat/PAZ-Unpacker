@@ -30,7 +30,7 @@ name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 // ── Version ──────────────────────────────────────────────────────────────────
-#define APP_VERSION               L"2.2.0"
+#define APP_VERSION               L"2.3.0"
 
 // ── Window layout ────────────────────────────────────────────────────────────
 #define WINDOW_MIN_WIDTH          1100

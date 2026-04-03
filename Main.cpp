@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <winhttp.h>
 
 namespace fs = std::filesystem;
@@ -704,6 +706,35 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
       }
       return 0;
 
+    case WM_CONTEXTMENU:
+      // Right-click on the main TreeView — show an Extract popup
+      if ((HWND)wParam == app.hTreeFileSystem) {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        TVHITTESTINFO ht = {};
+        ht.pt = pt;
+        ScreenToClient(app.hTreeFileSystem, &ht.pt);
+        HTREEITEM hHit = TreeView_HitTest(app.hTreeFileSystem, &ht);
+        if (hHit && (ht.flags & TVHT_ONITEM)) {
+          TreeView_SelectItem(app.hTreeFileSystem, hHit);
+          TVITEM tvi = {};
+          tvi.hItem = hHit;
+          tvi.mask  = TVIF_PARAM;
+          TreeView_GetItem(app.hTreeFileSystem, &tvi);
+          if (tvi.lParam) {
+            HMENU hMenu = CreatePopupMenu();
+            AppendMenuW(hMenu, MF_STRING | (app.bBusy ? MF_GRAYED : 0), 1, L"Extract");
+            int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, nullptr);
+            DestroyMenu(hMenu);
+            if (cmd == 1 && !app.bBusy) {
+              HANDLE hThread = CreateThread(nullptr, 0, ExtractThread, (LPVOID)tvi.lParam, 0, nullptr);
+              CloseHandle(hThread);
+            }
+          }
+        }
+        return 0;
+      }
+      break;
+
     // ── UAH dark menu-bar painting ───────────────────────────────────────────
     case WM_UAHDRAWMENU:
     {
@@ -1087,6 +1118,27 @@ static void SearchWnd_KickSearch(HWND hWnd) {
   CloseHandle(h);
 }
 
+// Force-expands the TreeView path to pTarget so it becomes visible and selectable.
+// Needed because the TreeView uses lazy loading — deep items have no HTREEITEM until expanded.
+static void ForceExpandToNode(HWND hTree, kukdh1::Tree *pTarget) {
+  const std::string &fullPath = pTarget->GetFileInfo().sFullPath;
+  std::vector<std::string> pathParts;
+  kukdh1::ParsePath(fullPath, pathParts);
+  if (pathParts.size() < 2) return;
+
+  kukdh1::Tree *ptr = app.CTree.get();
+  // Walk each folder level, ensuring children are added to the TreeView widget
+  for (size_t k = 0; k + 1 < pathParts.size(); k++) {
+    if (!ptr->IsChildAdded()) ptr->AddChildsToTree(hTree);
+    kukdh1::Tree *child = ptr->GetChildFolderWithName(pathParts[k]);
+    if (!child) return;
+    if (!child->IsAdded()) child->AddToTree(hTree);
+    ptr = child;
+  }
+  // Ensure the file node itself is added (children of its parent folder)
+  if (!ptr->IsChildAdded()) ptr->AddChildsToTree(hTree);
+}
+
 LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
     case WM_CREATE:
@@ -1279,10 +1331,57 @@ LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
         int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
         if (sel < 0 || sel >= (int)g_searchResults.size()) return 0;
         kukdh1::Tree *pTree = g_searchResults[sel];
-        if (pTree && pTree->GetHandle()) {
-          SetForegroundWindow(GetParent(hWnd));
-          TreeView_EnsureVisible(app.hTreeFileSystem, pTree->GetHandle());
-          TreeView_SelectItem(app.hTreeFileSystem, pTree->GetHandle());
+        if (pTree) {
+          // Force-expand path if item hasn't been added to the TreeView widget yet
+          if (!pTree->GetHandle()) {
+            ForceExpandToNode(app.hTreeFileSystem, pTree);
+          }
+          if (pTree->GetHandle()) {
+            HTREEITEM hItem  = pTree->GetHandle();
+            HWND      hParent = GetParent(hWnd);
+            // Navigate and select BEFORE closing (safe: pTree owned by app.CTree, not g_searchResults)
+            TreeView_EnsureVisible(app.hTreeFileSystem, hItem);
+            TreeView_SelectItem(app.hTreeFileSystem, hItem);
+            SetForegroundWindow(hParent);
+            SetFocus(app.hTreeFileSystem);  // highlight requires focus on the TreeView
+            DestroyWindow(hWnd);
+            return 0;
+          }
+          DestroyWindow(hWnd);
+        }
+      }
+      return 0;
+    }
+
+    case WM_CONTEXTMENU:
+    {
+      HWND hList = GetDlgItem(hWnd, ID_SEARCH_LIST);
+      if ((HWND)wParam != hList) break;
+      int sel = ListView_GetNextItem(hList, -1, LVNI_SELECTED);
+      if (sel < 0 || sel >= (int)g_searchResults.size()) break;
+
+      HMENU hMenu = CreatePopupMenu();
+      AppendMenuW(hMenu, MF_STRING | (app.bBusy ? MF_GRAYED : 0), 1, L"Extract");
+
+      int mx = GET_X_LPARAM(lParam), my = GET_Y_LPARAM(lParam);
+      if (mx == -1 && my == -1) {
+        // Keyboard invoke — position near selected item
+        RECT rc;
+        ListView_GetItemRect(hList, sel, &rc, LVIR_BOUNDS);
+        POINT pt = { rc.left + 4, rc.bottom };
+        ClientToScreen(hList, &pt);
+        mx = pt.x; my = pt.y;
+      }
+
+      int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, mx, my, 0, hWnd, nullptr);
+      DestroyMenu(hMenu);
+
+      if (cmd == 1 && !app.bBusy) {
+        kukdh1::Tree *pTree = g_searchResults[sel];
+        if (pTree) {
+          app.bBusy = true;
+          HANDLE h = CreateThread(nullptr, 0, ExtractThread, pTree, 0, nullptr);
+          CloseHandle(h);
         }
       }
       return 0;
@@ -1417,7 +1516,7 @@ DWORD WINAPI CheckUpdateThread(LPVOID arg) {
 
   // Strip leading 'v' for comparison with APP_VERSION (which has no 'v')
   std::string tagStripped = (!tagA.empty() && tagA[0] == 'v') ? tagA.substr(1) : tagA;
-  constexpr char appVerA[] = "2.2.0";  // must match APP_VERSION
+  constexpr char appVerA[] = "2.3.0";  // must match APP_VERSION
 
   if (tagStripped == appVerA) {
     PostMessage(hWnd, WM_APP_UPDATE_RESULT, (WPARAM)(INT_PTR)0, 0);
@@ -1521,6 +1620,41 @@ DWORD WINAPI FileThread(LPVOID arg) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Extraction helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Scan a PAM file's raw bytes for embedded texture filenames (.dds/.png/.bmp).
+// Returns deduplicated list of filenames found (e.g. "Trim_Wood_out_01.dds").
+static std::vector<std::string> ScanPamTextures(const std::wstring &path) {
+  std::vector<std::string> result;
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return result;
+  std::vector<char> data((std::istreambuf_iterator<char>(f)), {});
+
+  std::unordered_set<std::string> seen;
+  for (size_t i = 0; i + 4 <= data.size(); ) {
+    unsigned char c = (unsigned char)data[i];
+    if (c >= 0x20 && c <= 0x7e) {
+      size_t j = i;
+      while (j < data.size() && (unsigned char)data[j] >= 0x20 && (unsigned char)data[j] <= 0x7e) j++;
+      size_t len = j - i;
+      if (len >= 5 && len < 260) {
+        std::string s(data.begin() + i, data.begin() + j);
+        if (s.size() >= 4) {
+          std::string ext = s.substr(s.size() - 4);
+          std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char x){ return (char)::tolower(x); });
+          if ((ext == ".dds" || ext == ".png" || ext == ".bmp") && !seen.count(s)) {
+            result.push_back(s);
+            seen.insert(s);
+          }
+        }
+      }
+      i = j;
+    } else {
+      i++;
+    }
+  }
+  return result;
+}
+
 bool CheckEncrypt(const std::string &filename, uint32_t size) {
   assert(!filename.empty());
   if (filename.length() < 5) return false;
@@ -1579,12 +1713,14 @@ bool ExtractFile(const std::wstring &path, const kukdh1::FileInfo &file, kukdh1:
 // Extraction thread
 // ─────────────────────────────────────────────────────────────────────────────
 DWORD WINAPI ExtractThread(LPVOID arg) {
+  CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
   app.bBusy = true;
   kukdh1::Tree     *CTree = (kukdh1::Tree *)arg;
   kukdh1::CryptICE  cipher(ICE_KEY, ICE_KEY_LEN);
   WCHAR buffer[128];
   std::wstring sFolderPath;
   std::wstring sLastExtractPath;
+  int totalTexExtracted = 0;
 
   app.CSetting.getData(SETTING_LAST_EXTRACT, sLastExtractPath, L"");
   EnableWindow(app.hButtonExctact, FALSE);
@@ -1598,6 +1734,7 @@ DWORD WINAPI ExtractThread(LPVOID arg) {
     // User cancelled — bail out
     EnableWindow(app.hButtonExctact, TRUE);
     app.bBusy = false;
+    CoUninitialize();
     return 0;
   } else {
     app.CSetting.setData(SETTING_LAST_EXTRACT, sFolderPath);
@@ -1612,6 +1749,11 @@ DWORD WINAPI ExtractThread(LPVOID arg) {
 
     SendMessage(app.hProgressBar, PBM_SETRANGE32, 0, uiFiles);
     uint32_t i = 1;
+
+    // Tracks filenames already extracted (from file list or texture scan) to avoid duplicates.
+    std::unordered_set<std::string> extractedNames;
+    // Lazily-built index: lowercase filename → first matching Tree node (for texture lookup).
+    std::unordered_map<std::string, kukdh1::Tree*> nameIdx;
 
     for (auto &info : vFileList) {
       std::vector<std::string> paths;
@@ -1642,13 +1784,67 @@ DWORD WINAPI ExtractThread(LPVOID arg) {
       SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)buffer);
       ExtractFile(savePath, info, cipher);
       SendMessage(app.hProgressBar, PBM_SETPOS, i++, 0);
+
+      extractedNames.insert(paths.back());
+
+      // If this is a PAM model file, extract its referenced textures alongside it.
+      std::string baseName = paths.back();
+      std::string baseExt  = baseName.size() >= 4 ? baseName.substr(baseName.size() - 4) : "";
+      std::transform(baseExt.begin(), baseExt.end(), baseExt.begin(), [](unsigned char x){ return (char)::tolower(x); });
+      if (baseExt == ".pam") {
+        // Build the full-tree filename index once per extraction operation.
+        if (nameIdx.empty() && app.CTree) {
+          SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Building texture index...");
+          std::vector<kukdh1::Tree*> allNodes;
+          app.CTree->GetFileNodeList(allNodes);
+          for (auto *n : allNodes) {
+            std::string nm  = n->GetName();
+            std::string nml = nm;
+            std::transform(nml.begin(), nml.end(), nml.begin(), [](unsigned char x){ return (char)::tolower(x); });
+            if (!nameIdx.count(nml)) nameIdx[nml] = n;
+          }
+        }
+
+        auto texNames = ScanPamTextures(savePath);
+        for (auto &texName : texNames) {
+          if (extractedNames.count(texName)) continue;
+          std::string texLower = texName;
+          std::transform(texLower.begin(), texLower.end(), texLower.begin(), [](unsigned char x){ return (char)::tolower(x); });
+          auto it = nameIdx.find(texLower);
+          if (it != nameIdx.end()) {
+            std::wstring wTexName;
+            kukdh1::ConvertWidechar(texName, wTexName);
+
+            // Ensure the output directory exists (texture may be in a different PAZ folder)
+            std::error_code ec2;
+            fs::create_directories(dirPath, ec2);
+
+            if (ExtractFile(dirPath + wTexName, it->second->GetFileInfo(), cipher)) {
+              extractedNames.insert(texName);
+              totalTexExtracted++;
+            }
+          }
+        }
+
+        // Show diagnostic: how many textures were found/extracted for this PAM
+        swprintf_s(buffer, L"PAM: %d/%d textures extracted",
+                   totalTexExtracted, (int)texNames.size());
+        SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)buffer);
+
+      }
     }
   }
 
   SendMessage(app.hProgressBar, PBM_SETPOS, 0, 0);
-  SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)app.CSetting.getString(kukdh1::Setting::ID_PROGRESS_READY).c_str());
+  if (totalTexExtracted > 0) {
+    swprintf_s(buffer, L"Done (+ %d textures)", totalTexExtracted);
+    SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)buffer);
+  } else {
+    SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)app.CSetting.getString(kukdh1::Setting::ID_PROGRESS_READY).c_str());
+  }
   EnableWindow(app.hButtonExctact, TRUE);
   app.bBusy = false;
+  CoUninitialize();
   return 0;
 }
 

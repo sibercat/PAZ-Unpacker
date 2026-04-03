@@ -6,6 +6,7 @@
 #include <Windows.h>
 #include <CommCtrl.h>
 #include <ShlObj.h>
+#include <ShObjIdl.h>
 #include <vector>
 #include <string>
 #include <sstream>
