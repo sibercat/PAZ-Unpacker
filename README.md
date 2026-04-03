@@ -1,4 +1,5 @@
 # PAZ Unpacker
+Executable can be found in [Releases](https://github.com/sibercat/PAZ-Unpacker/releases)
 
 A Windows GUI tool for unpacking and extracting files from **Black Desert Online** (BDO) `.PAZ` archive files.
 
