@@ -60,6 +60,7 @@ namespace kukdh1 {
       void getData(std::wstring name, std::wstring &value, std::wstring defaultValue = L"");
       void getData(std::wstring name, int &value, int defaultValue = 0);
       std::wstring getString(LANG_ID id);
+      void Save();  // explicitly flush XML to disk (destructor won't run with ExitProcess)
   };
 }
 

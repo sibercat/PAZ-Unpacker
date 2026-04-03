@@ -88,6 +88,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="Cache.cpp" />
     <ClCompile Include="Crypt.cpp" />
     <ClCompile Include="Helper.cpp" />
     <ClCompile Include="Main.cpp" />
@@ -98,6 +99,7 @@
     <ClCompile Include="xml\pugixml.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="Cache.h" />
     <ClInclude Include="Crypt.h" />
     <ClInclude Include="Helper.h" />
     <ClInclude Include="Main.h" />
