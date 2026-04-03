@@ -11,13 +11,41 @@ A Windows GUI tool for unpacking and extracting files from **Black Desert Online
 
 - Browse the virtual filesystem inside BDO PAZ archives
 - Extract individual files, folders, or entire archives
+- **Dark mode UI** — full dark theme across all controls and windows
+- **Settings dialog** — configure your PAZ folder and extract path once; no dialogs after that
+- **Load button** — one-click load from your saved PAZ folder path
+- **Extract button** — extracts directly to your saved path, no browse dialog if already configured
+- **Search window** — fast non-blocking search across all 800k+ files with live filtering
+- **Check for Updates** — checks GitHub releases for new versions
+- **File preview** — inline DDS/PNG/BMP texture preview panel
+- **Cache** — binary cache (v2) for fast startup; embeds folder path for multi-installation support
 - Multi-language support (English, Japanese, Korean)
 - Displays file metadata: size, PAZ source, internal path
 
 ## What's new in this fork
 
-The original project was last updated in 2015. This fork modernises the codebase while keeping full compatibility with the original PAZ format:
+The original project was last updated in 2015. This fork modernises the codebase while keeping full compatibility with the original PAZ format.
 
+### v2.2.0
+| Area | Change |
+|---|---|
+| **Dark mode** | Full Win32 dark theme — title bar, menu bar, status bar, tree, buttons, all dialogs |
+| **Settings** | New Settings dialog to configure PAZ folder path and extract output path |
+| **Load button** | One-click load from saved PAZ path — no browse dialog needed |
+| **Extract button** | Moved to toolbar next to Load; uses saved extract path directly |
+| **Search window** | Non-modal floating window with virtual ListView + background search thread (no UI freeze on 800k+ files) |
+| **Cache v2** | Cache header now stores the PAZ folder path — supports multiple BDO installations |
+| **Check for Updates** | Help menu item checks GitHub releases API for newer versions |
+| **Settings persistence** | Explicit save on exit — fixes settings loss caused by `ExitProcess` skipping destructors |
+
+### v2.1.0
+| Area | Change |
+|---|---|
+| **Versioning** | Version string shown in title bar and about box |
+| **Texture preview** | Inline DDS/PNG/BMP preview panel using WIC |
+| **Search** | Live search with extension filters (moved to Search window in v2.2.0) |
+
+### Foundation (v2.0.0)
 | Area | Change |
 |---|---|
 | **Platform** | Upgraded from 32-bit to **64-bit (x64)** — handles large archives correctly |
@@ -50,9 +78,11 @@ The original project was last updated in 2015. This fork modernises the codebase
 ## Usage
 
 1. Launch `PAZ-Unpacker.exe`
-2. Click **Open** and select the folder containing your BDO PAZ files (the folder with `pad00000.meta`)
-3. Browse the file tree on the left
-4. Select a file or folder, then click **Extract** to save it to disk
+2. Go to **Settings → Configure Paths** and set your PAZ folder (the folder containing `pad00000.meta`) and your preferred extract output folder
+3. Click **Load** to load the PAZ archive — subsequent launches just press Load
+4. Browse the file tree on the left
+5. Select a file, folder, or the root node, then click **Extract**
+6. Use **Search** in the menu bar to search across all files by name or extension (e.g. `.dds`, `ui_texture`)
 
 ## Format notes (from original README)
 
