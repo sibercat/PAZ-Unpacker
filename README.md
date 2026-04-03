@@ -38,13 +38,6 @@ The original project was last updated in 2015. This fork modernises the codebase
 | **Check for Updates** | Help menu item checks GitHub releases API for newer versions |
 | **Settings persistence** | Explicit save on exit — fixes settings loss caused by `ExitProcess` skipping destructors |
 
-### v2.1.0
-| Area | Change |
-|---|---|
-| **Versioning** | Version string shown in title bar and about box |
-| **Texture preview** | Inline DDS/PNG/BMP preview panel using WIC |
-| **Search** | Live search with extension filters (moved to Search window in v2.2.0) |
-
 ### Foundation (v2.0.0)
 | Area | Change |
 |---|---|
