@@ -89,7 +89,10 @@ namespace kukdh1 {
   }
 
   Setting::~Setting() {
-    // Save settings
+    Save();
+  }
+
+  void Setting::Save() {
     setting.save_file(filepath.c_str(), L"  ", pugi::format_default, pugi::encoding_utf8);
   }
 
