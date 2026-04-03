@@ -48,10 +48,6 @@ The original project was last updated in 2015. This fork modernises the codebase
 | **Paths** | Manual `CreateDirectory` loop → `std::filesystem::create_directories` |
 | **Error handling** | Silent failures → `std::runtime_error` with descriptive messages |
 | **Thread safety** | Added `std::atomic<bool>` busy flag guarding all thread spawns |
-| **Bug fix** | Dangling pointer in `AddThread` (temporary `.c_str()` passed to callback) |
-| **Bug fix** | `ConvertWidechar` undefined behaviour (`(wchar_t*)out.c_str()` write) |
-| **Bug fix** | `BrowseFolder` undefined behaviour (writing through `wstring::c_str()`) |
-| **Bug fix** | `catch(std::exception e)` by value → `catch(const std::exception &e)` |
 | **Assertions** | `assert()` precondition checks on all critical parsing functions |
 | **Code quality** | `nullptr` throughout, `const`-correct getters, range-based for loops |
 
