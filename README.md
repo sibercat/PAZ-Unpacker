@@ -27,19 +27,7 @@ A Windows GUI tool for unpacking and extracting files from **Black Desert Online
 
 The original project was last updated in 2015. This fork modernises the codebase while keeping full compatibility with the original PAZ format.
 
-### v2.2.0
-| Area | Change |
-|---|---|
-| **Dark mode** | Full Win32 dark theme — title bar, menu bar, status bar, tree, buttons, all dialogs |
-| **Settings** | New Settings dialog to configure PAZ folder path and extract output path |
-| **Load button** | One-click load from saved PAZ path — no browse dialog needed |
-| **Extract button** | Moved to toolbar next to Load; uses saved extract path directly |
-| **Search window** | Non-modal floating window with virtual ListView + background search thread (no UI freeze on 800k+ files) |
-| **Cache v2** | Cache header now stores the PAZ folder path — supports multiple BDO installations |
-| **Check for Updates** | Help menu item checks GitHub releases API for newer versions |
-| **Settings persistence** | Explicit save on exit — fixes settings loss caused by `ExitProcess` skipping destructors |
-
-### Foundation (v2.0.0)
+### Foundation
 | Area | Change |
 |---|---|
 | **Platform** | Upgraded from 32-bit to **64-bit (x64)** — handles large archives correctly |
