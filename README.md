@@ -75,6 +75,6 @@ The original project was last updated in 2015. This fork modernises the codebase
 
 ## License
 
-The original source code has no license — all original rights belong to **kukdh1**.  
-Modifications made in this fork are © the contributors of this repository.  
+Modifications made in this fork are licensed under the [MIT License](LICENSE).  
+The original source code was published without a license — all original rights belong to **kukdh1**.  
 See [CREDITS](CREDITS) for full attribution.
