@@ -30,7 +30,7 @@ name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 // ── Version ──────────────────────────────────────────────────────────────────
-#define APP_VERSION               L"2.3.0"
+#define APP_VERSION               L"2.3.1"
 
 // ── Window layout ────────────────────────────────────────────────────────────
 #define WINDOW_MIN_WIDTH          1100
@@ -58,7 +58,6 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define FONT_FACE                 L"Segoe UI"
 
 // ── Control IDs ──────────────────────────────────────────────────────────────
-#define ID_BUTTON_OPEN            0
 #define ID_BUTTON_EXTRACT         1
 #define ID_BUTTON_LOAD            2
 #define ID_TREE_FILESYSTEM        10
@@ -96,7 +95,6 @@ constexpr int PREVIEW_SIZE_LIMIT = 32 * 1024 * 1024;   // 32 MB max for preview
 // ── Application state ────────────────────────────────────────────────────────
 typedef struct _AppData {
   // Controls
-  HWND hButtonOpen;
   HWND hButtonExctact;
   HWND hButtonLoad;
   HWND hTreeFileSystem;
@@ -127,7 +125,7 @@ typedef struct _AppData {
   std::atomic<bool> bBusy;
 
   _AppData() :
-    hButtonOpen(nullptr), hButtonExctact(nullptr), hButtonLoad(nullptr),
+    hButtonExctact(nullptr), hButtonLoad(nullptr),
     hTreeFileSystem(nullptr), hStatusBar(nullptr),
     hStaticInfo(nullptr), hProgressBar(nullptr),
     hPreviewPanel(nullptr), hSearchWnd(nullptr),

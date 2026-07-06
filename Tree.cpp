@@ -3,7 +3,9 @@
 
 namespace kukdh1 {
   bool TreeCompare(const std::unique_ptr<Tree> &a, const std::unique_ptr<Tree> &b) {
-    return a->GetName().compare(b->GetName()) <= 0;
+    // Must be strict (<, not <=): equal names occur (patched files duplicated
+    // across PAZ archives) and a non-strict comparator is UB in std::sort.
+    return a->GetName().compare(b->GetName()) < 0;
   }
 
   Tree::Tree(TREE_TYPE type) {

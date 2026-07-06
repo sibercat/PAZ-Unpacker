@@ -1,4 +1,5 @@
 # Build output
+build_out.txt
 /.vs
 /Debug
 /Release

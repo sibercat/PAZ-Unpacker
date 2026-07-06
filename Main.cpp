@@ -442,7 +442,6 @@ void Cls_OnCommand(HWND hWnd, int id, HWND hwndCtl, UINT codeNotify) {
       }
       break;
 
-    case ID_BUTTON_OPEN:
     case ID_MENU_FILE_OPEN:
       {
         if (app.bBusy) break;
@@ -464,8 +463,13 @@ void Cls_OnCommand(HWND hWnd, int id, HWND hwndCtl, UINT codeNotify) {
         tvi.mask  = TVIF_PARAM;
         TreeView_GetItem(app.hTreeFileSystem, &tvi);
         if (tvi.lParam) {
-          HANDLE hThread = CreateThread(nullptr, 0, ExtractThread, (LPVOID)tvi.lParam, 0, nullptr);
-          CloseHandle(hThread);
+          // Claim bBusy before spawning — a plain check would let two rapid
+          // invocations (button + menu + right-click) start parallel extracts.
+          bool expected = false;
+          if (app.bBusy.compare_exchange_strong(expected, true)) {
+            HANDLE hThread = CreateThread(nullptr, 0, ExtractThread, (LPVOID)tvi.lParam, 0, nullptr);
+            CloseHandle(hThread);
+          }
         }
       }
       break;
@@ -503,7 +507,7 @@ void Cls_OnCommand(HWND hWnd, int id, HWND hwndCtl, UINT codeNotify) {
 
     case ID_MENU_HELP_CHECK_UPDATE:
     {
-      // Disable item while checking to prevent double-clicks (Help is index 3)
+      // Disable item while checking to prevent double-clicks (Help is index 4)
       HMENU hBar = GetMenu(hWnd);
       HMENU hHelp = GetSubMenu(hBar, 4);
       EnableMenuItem(hHelp, ID_MENU_HELP_CHECK_UPDATE, MF_BYCOMMAND | MF_GRAYED);
@@ -586,7 +590,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
 
     case WM_APP_UPDATE_RESULT:
       {
-        // Re-enable the menu item (Help is now index 3 — File/Cache/Settings/Help)
+        // Re-enable the menu item (Help is index 4 — File/Cache/Search/Settings/Help)
         HMENU hBar  = GetMenu(hWnd);
         HMENU hHelp = GetSubMenu(hBar, 4);
         EnableMenuItem(hHelp, ID_MENU_HELP_CHECK_UPDATE, MF_BYCOMMAND | MF_ENABLED);
@@ -725,7 +729,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
             AppendMenuW(hMenu, MF_STRING | (app.bBusy ? MF_GRAYED : 0), 1, L"Extract");
             int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, nullptr);
             DestroyMenu(hMenu);
-            if (cmd == 1 && !app.bBusy) {
+            bool expected = false;
+            if (cmd == 1 && app.bBusy.compare_exchange_strong(expected, true)) {
               HANDLE hThread = CreateThread(nullptr, 0, ExtractThread, (LPVOID)tvi.lParam, 0, nullptr);
               CloseHandle(hThread);
             }
@@ -778,6 +783,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
 // Open PAZ folder — shared by Open button, menu, and Rebuild Cache
 // ─────────────────────────────────────────────────────────────────────────────
 void OpenPazFolder(HWND hWnd, const std::wstring &folderPath) {
+  // Close the Search window first — its result list holds raw Tree* pointers
+  // into the tree we are about to destroy (its next repaint would read freed memory).
+  if (app.hSearchWnd && IsWindow(app.hSearchWnd))
+    DestroyWindow(app.hSearchWnd);
+
   // Reset UI
   TreeView_DeleteAllItems(app.hTreeFileSystem);
   SendMessage(app.hStaticInfo, WM_SETTEXT, 0, (LPARAM)L"");
@@ -785,8 +795,12 @@ void OpenPazFolder(HWND hWnd, const std::wstring &folderPath) {
   InvalidateRect(app.hPreviewPanel, nullptr, TRUE);
   SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"");
 
-  app.CTree.reset();
-  app.CMeta.reset();
+  {
+    // app.mtx guards app.CTree against an in-flight SearchThread still walking it
+    std::lock_guard<std::mutex> lock(app.mtx);
+    app.CTree.reset();
+    app.CMeta.reset();
+  }
   app.wsFolderPath = folderPath;
   app.CSetting.setData(SETTING_LAST_FOLDER, app.wsFolderPath);
 
@@ -796,7 +810,10 @@ void OpenPazFolder(HWND hWnd, const std::wstring &folderPath) {
 
   try {
     app.CMeta = std::make_unique<kukdh1::Meta>((wchar_t *)app.wsFolderPath.c_str());
-    app.CTree = std::make_unique<kukdh1::Tree>(kukdh1::Tree::TREE_TYPE_ROOT);
+    {
+      std::lock_guard<std::mutex> lock(app.mtx);
+      app.CTree = std::make_unique<kukdh1::Tree>(kukdh1::Tree::TREE_TYPE_ROOT);
+    }
 
     // Use cache if available and up-to-date, otherwise do full PAZ scan
     if (kukdh1::IsCacheValid(app.wsFolderPath)) {
@@ -826,7 +843,6 @@ DWORD WINAPI CacheLoadThread(LPVOID) {
   app.bBusy = true;
   EnableWindow(app.hTreeFileSystem, FALSE);
   EnableWindow(app.hButtonLoad,     FALSE);
-  EnableWindow(app.hButtonOpen,     FALSE);
   EnableWindow(app.hButtonExctact,  FALSE);
   SendMessage(app.hStatusBar, SB_SETTEXT, 0, (LPARAM)app.CSetting.getString(kukdh1::Setting::ID_STATUS_BUSY).c_str());
   SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Loading from cache...");
@@ -837,10 +853,12 @@ DWORD WINAPI CacheLoadThread(LPVOID) {
   if (!ok) {
     // Cache corrupt or stale — fall back to full scan
     DeleteFileW(kukdh1::CachePath(app.wsFolderPath).c_str());
-    app.CTree = std::make_unique<kukdh1::Tree>(kukdh1::Tree::TREE_TYPE_ROOT);
+    {
+      std::lock_guard<std::mutex> lock(app.mtx);
+      app.CTree = std::make_unique<kukdh1::Tree>(kukdh1::Tree::TREE_TYPE_ROOT);
+    }
     EnableWindow(app.hTreeFileSystem, TRUE);
     EnableWindow(app.hButtonLoad,     TRUE);
-    EnableWindow(app.hButtonOpen,     TRUE);
     EnableWindow(app.hButtonExctact,  FALSE);  // stays disabled until a file node is selected
     app.bBusy = false;
     PostMessage(GetParent(app.hTreeFileSystem), WM_APP_LOAD_FALLBACK, 0, 0);
@@ -860,7 +878,6 @@ DWORD WINAPI CacheLoadThread(LPVOID) {
   SendMessage(app.hStatusBar,   SB_SETTEXT, 2, (LPARAM)app.CSetting.getString(kukdh1::Setting::ID_PROGRESS_READY).c_str());
 
   EnableWindow(app.hButtonLoad,     TRUE);
-  EnableWindow(app.hButtonOpen,     TRUE);
   EnableWindow(app.hButtonExctact,  FALSE);  // stays disabled until a file node is selected
   EnableWindow(app.hTreeFileSystem, TRUE);
 
@@ -1045,7 +1062,6 @@ void ShowSettingsDialog(HWND hParent) {
 // Uses LVS_OWNERDATA (virtual mode) + background search thread so the UI never
 // freezes regardless of result count.
 // ─────────────────────────────────────────────────────────────────────────────
-#include <CommCtrl.h>  // ListView
 
 // Results shared between search thread and UI thread.
 // Written by search thread; read by LVN_GETDISPINFO on UI thread.
@@ -1067,39 +1083,38 @@ static DWORD WINAPI SearchThread(LPVOID arg) {
   std::wstring pat = std::move(p->pat);
   delete p;
 
-  if (!app.CTree) {
-    if (g_searchGen.load() == gen)
-      PostMessage(hWnd, WM_APP_SEARCH_DONE, (WPARAM)gen, (LPARAM) new std::vector<kukdh1::Tree*>());
-    return 0;
-  }
-
-  std::vector<kukdh1::Tree*> allFiles;
-  app.CTree->GetFileNodeList(allFiles);
-
   auto *results = new std::vector<kukdh1::Tree*>();
-  if (pat.empty()) {
-    // empty pattern → no results shown, just total count
-  } else {
-    results->reserve(std::min<size_t>(allFiles.size(), 4096));
-    for (auto *node : allFiles) {
-      if (g_searchGen.load() != gen) { delete results; return 0; }  // cancelled
-      const std::string &fp = node->GetFileInfo().sFullPath;
-      std::wstring wfp;
-      kukdh1::ConvertWidechar(fp, wfp);
-      std::transform(wfp.begin(), wfp.end(), wfp.begin(), ::towlower);
-      if (wfp.find(pat) != std::wstring::npos)
-        results->push_back(node);
+  {
+    // Hold app.mtx for the whole walk — OpenPazFolder resets app.CTree under
+    // the same lock, so nodes can't be freed while we're reading them.
+    std::lock_guard<std::mutex> lock(app.mtx);
+    if (app.CTree && !pat.empty()) {
+      std::vector<kukdh1::Tree*> allFiles;
+      app.CTree->GetFileNodeList(allFiles);
+
+      results->reserve(std::min<size_t>(allFiles.size(), 4096));
+      for (auto *node : allFiles) {
+        if (g_searchGen.load() != gen) { delete results; return 0; }  // cancelled
+        const std::string &fp = node->GetFileInfo().sFullPath;
+        std::wstring wfp;
+        kukdh1::ConvertWidechar(fp, wfp);
+        std::transform(wfp.begin(), wfp.end(), wfp.begin(), ::towlower);
+        if (wfp.find(pat) != std::wstring::npos)
+          results->push_back(node);
+      }
     }
   }
 
-  if (g_searchGen.load() == gen)
-    PostMessage(hWnd, WM_APP_SEARCH_DONE, (WPARAM)gen, (LPARAM)results);
-  else
+  // PostMessage fails if the window was destroyed before we finished — free then.
+  if (g_searchGen.load() != gen ||
+      !PostMessage(hWnd, WM_APP_SEARCH_DONE, (WPARAM)gen, (LPARAM)results))
     delete results;
   return 0;
 }
 
 static void SearchWnd_KickSearch(HWND hWnd) {
+  if (app.bBusy) return;  // tree is being rebuilt — don't race the load thread
+
   HWND hEdit = GetDlgItem(hWnd, ID_SEARCH_EDIT);
   int len = GetWindowTextLengthW(hEdit);
   std::wstring pat(len + 1, L'\0');
@@ -1376,10 +1391,10 @@ LRESULT CALLBACK SearchWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
       int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, mx, my, 0, hWnd, nullptr);
       DestroyMenu(hMenu);
 
-      if (cmd == 1 && !app.bBusy) {
+      if (cmd == 1) {
         kukdh1::Tree *pTree = g_searchResults[sel];
-        if (pTree) {
-          app.bBusy = true;
+        bool expected = false;
+        if (pTree && app.bBusy.compare_exchange_strong(expected, true)) {
           HANDLE h = CreateThread(nullptr, 0, ExtractThread, pTree, 0, nullptr);
           CloseHandle(h);
         }
@@ -1516,9 +1531,18 @@ DWORD WINAPI CheckUpdateThread(LPVOID arg) {
 
   // Strip leading 'v' for comparison with APP_VERSION (which has no 'v')
   std::string tagStripped = (!tagA.empty() && tagA[0] == 'v') ? tagA.substr(1) : tagA;
-  constexpr char appVerA[] = "2.3.0";  // must match APP_VERSION
+  constexpr char appVerA[] = "2.3.1";  // must match APP_VERSION
 
-  if (tagStripped == appVerA) {
+  // Compare numerically — a remote tag older than or equal to this build
+  // (e.g. running a dev build ahead of the latest release) is "up to date".
+  int rMaj = 0, rMin = 0, rPat = 0, lMaj = 0, lMin = 0, lPat = 0;
+  sscanf_s(tagStripped.c_str(), "%d.%d.%d", &rMaj, &rMin, &rPat);
+  sscanf_s(appVerA,             "%d.%d.%d", &lMaj, &lMin, &lPat);
+  bool newer = (rMaj != lMaj) ? (rMaj > lMaj)
+             : (rMin != lMin) ? (rMin > lMin)
+             : (rPat > lPat);
+
+  if (!newer) {
     PostMessage(hWnd, WM_APP_UPDATE_RESULT, (WPARAM)(INT_PTR)0, 0);
   } else {
     // Convert tag to wchar_t for display
@@ -1540,7 +1564,6 @@ DWORD WINAPI FileThread(LPVOID arg) {
   WCHAR buffer[128];
 
   EnableWindow(app.hButtonLoad, FALSE);
-  EnableWindow(app.hButtonOpen, FALSE);
   EnableWindow(app.hTreeFileSystem, FALSE);
   SendMessage(app.hStatusBar, SB_SETTEXT, 0, (LPARAM)app.CSetting.getString(kukdh1::Setting::ID_STATUS_BUSY).c_str());
   SendMessage(app.hProgressBar, PBM_SETRANGE32, 0, app.CMeta->uiPAZFileCount);
@@ -1603,7 +1626,6 @@ DWORD WINAPI FileThread(LPVOID arg) {
 
   SendMessage(app.hStatusBar, SB_SETTEXT, 0, (LPARAM)app.CSetting.getString(kukdh1::Setting::ID_STATUS_IDLE).c_str());
   EnableWindow(app.hButtonLoad,     TRUE);
-  EnableWindow(app.hButtonOpen,     TRUE);
   EnableWindow(app.hButtonExctact,  FALSE);  // stays disabled until a file node is selected
   EnableWindow(app.hTreeFileSystem, TRUE);
 
@@ -1663,8 +1685,10 @@ bool CheckEncrypt(const std::string &filename, uint32_t size) {
 
 bool ExtractFile(const std::wstring &path, const kukdh1::FileInfo &file, kukdh1::Crypt &cipher) {
   assert(!path.empty());
-  assert(file.uiCompressedSize > 0);
-  assert(file.uiOriginalSize > 0);
+
+  // Runtime checks, not asserts — asserts compile out in Release and a corrupt
+  // record would otherwise hit UB below.
+  if (file.uiCompressedSize == 0 || file.uiOriginalSize == 0) return false;
 
   bool bCompressed = (file.uiOriginalSize > file.uiCompressedSize);
   bool bEncrypted  = !CheckEncrypt(file.sFullPath, file.uiCompressedSize);
@@ -1687,7 +1711,12 @@ bool ExtractFile(const std::wstring &path, const kukdh1::FileInfo &file, kukdh1:
   uint32_t decrypted_len  = length;
 
   if (bEncrypted) {
-    cipher.decrypt(encrypted.data(), length, &raw_decrypted, &decrypted_len);
+    try {
+      cipher.decrypt(encrypted.data(), length, &raw_decrypted, &decrypted_len);
+    }
+    catch (...) {
+      return false;  // corrupt record — length not a cipher-block multiple, etc.
+    }
     owned_decrypt.reset(raw_decrypted);
   }
   else {
@@ -1695,14 +1724,43 @@ bool ExtractFile(const std::wstring &path, const kukdh1::FileInfo &file, kukdh1:
     decrypted_len = length;
   }
 
-  if (bCompressed || raw_decrypted[0] == 0x6E) {
+  // Read the payload's compression-header length if one can be present.
+  // Header layout: byte0 flags (0x01 = packed; 0x02 = 32-bit length at +5,
+  // otherwise 8-bit length at +2).
+  uint32_t embeddedLen = 0;
+  bool haveHeader = false;
+  if (decrypted_len >= 3) {
+    if (raw_decrypted[0] & 0x02) {
+      if (decrypted_len >= 9) {
+        embeddedLen = *reinterpret_cast<const uint32_t *>(raw_decrypted + 5);
+        haveHeader = true;
+      }
+    } else {
+      embeddedLen = raw_decrypted[2];
+      haveHeader = true;
+    }
+  }
+
+  // Unpack when the index says the file shrank, or when an unshrunken payload
+  // carries the stored-block wrapper (0x6E) with a length that matches the
+  // index — a plain file merely starting with 'n' won't satisfy both.
+  bool bUnpack = haveHeader &&
+    (bCompressed || (raw_decrypted[0] == 0x6E && embeddedLen == file.uiOriginalSize));
+
+  if (bUnpack) {
+    // Never let decompress() write past the buffer the index sized for us.
+    if (embeddedLen > file.uiOriginalSize) return false;
     std::vector<uint8_t> decompressed(file.uiOriginalSize);
     kukdh1::decompress(raw_decrypted, decompressed.data());
     owned_decrypt.reset();
     savefile.write(reinterpret_cast<const char *>(decompressed.data()), file.uiOriginalSize);
   }
+  else if (bCompressed) {
+    return false;  // index says compressed but payload is too short for a header
+  }
   else {
-    savefile.write(reinterpret_cast<const char *>(raw_decrypted), file.uiOriginalSize);
+    savefile.write(reinterpret_cast<const char *>(raw_decrypted),
+                   std::min<uint32_t>(decrypted_len, file.uiOriginalSize));
   }
 
   savefile.close();
@@ -1806,6 +1864,7 @@ DWORD WINAPI ExtractThread(LPVOID arg) {
         }
 
         auto texNames = ScanPamTextures(savePath);
+        int pamTexExtracted = 0;
         for (auto &texName : texNames) {
           if (extractedNames.count(texName)) continue;
           std::string texLower = texName;
@@ -1821,6 +1880,7 @@ DWORD WINAPI ExtractThread(LPVOID arg) {
 
             if (ExtractFile(dirPath + wTexName, it->second->GetFileInfo(), cipher)) {
               extractedNames.insert(texName);
+              pamTexExtracted++;
               totalTexExtracted++;
             }
           }
@@ -1828,7 +1888,7 @@ DWORD WINAPI ExtractThread(LPVOID arg) {
 
         // Show diagnostic: how many textures were found/extracted for this PAM
         swprintf_s(buffer, L"PAM: %d/%d textures extracted",
-                   totalTexExtracted, (int)texNames.size());
+                   pamTexExtracted, (int)texNames.size());
         SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)buffer);
 
       }
@@ -1857,7 +1917,6 @@ DWORD WINAPI AddThread(LPVOID arg) {
   if (!pTree->IsGrandchildAdded()) {
     app.bBusy = true;
     EnableWindow(app.hTreeFileSystem, FALSE);
-    EnableWindow(app.hButtonOpen,    FALSE);
     EnableWindow(app.hButtonExctact, FALSE);
 
     std::wstring statusMsg = app.CSetting.getString(kukdh1::Setting::ID_PROGRESS_NEW_ADDING);
@@ -1875,7 +1934,6 @@ DWORD WINAPI AddThread(LPVOID arg) {
     SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)app.CSetting.getString(kukdh1::Setting::ID_PROGRESS_READY).c_str());
 
     EnableWindow(app.hButtonExctact, TRUE);
-    EnableWindow(app.hButtonOpen,    TRUE);
     EnableWindow(app.hTreeFileSystem, TRUE);
     app.bBusy = false;
   }

@@ -22,12 +22,25 @@ namespace kukdh1 {
 
       // Read Header
       file.read((char *)buffer, 8);
+      if (file.gcount() != 8) {
+        throw std::runtime_error("pad00000.meta is corrupt: truncated header");
+      }
 			memcpy(&uiVersion, buffer + 0, 4);
 			memcpy(&uiPAZFileCount, buffer + 4, 4);
 
+      // Sanity bound — a foreign or corrupt meta file would otherwise loop
+      // over garbage (BDO ships ~11k PAZ files).
+      if (uiPAZFileCount == 0 || uiPAZFileCount > 100000) {
+        throw std::runtime_error("pad00000.meta is invalid: unreasonable PAZ file count");
+      }
+
       // Read PAZ File information
+      vPAZs.reserve(uiPAZFileCount);
       for (uint32_t idx = 0; idx < uiPAZFileCount; idx++) {
         file.read((char *)buffer, 12);
+        if (file.gcount() != 12) {
+          throw std::runtime_error("pad00000.meta is corrupt: truncated PAZ table");
+        }
 
         vPAZs.push_back(PAZTable(buffer));
       }

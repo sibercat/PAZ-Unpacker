@@ -1,9 +1,9 @@
 #include "Setting.h"
 
+#include <filesystem>
+
 namespace kukdh1 {
   Setting::Setting() {
-    DWORD dwLength;
-
     pDefaultLanguage = {
       { L"PAZ Unpacker" },
       { L"PAZ Unpacker - %s" },
@@ -29,17 +29,14 @@ namespace kukdh1 {
       { L"(%d/%d) Adding data to tree..." }
     };
 
-    // Get current directory
-    dwLength = GetCurrentDirectory(0, NULL);
+    // Settings live next to the exe — the working directory varies with how
+    // the app is launched (shortcut "Start in", terminal CWD) and would
+    // silently scatter Setting.xml copies around.
+    WCHAR exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    filepath = std::filesystem::path(exePath).parent_path().wstring();
 
-    filepath.resize(dwLength);
-    GetCurrentDirectory(dwLength, (wchar_t *)filepath.c_str());
-
-    // Delete null-terminator
-    filepath.pop_back();
-
-    // Make path of xml file
-    if (filepath.back() != L'\\')
+    if (!filepath.empty() && filepath.back() != L'\\')
       filepath.append(L"\\");
 
     filepath.append(DEFAULT_SETTING_FILENAME);
