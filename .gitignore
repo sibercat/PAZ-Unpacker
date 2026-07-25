@@ -1,3 +1,6 @@
+# Local-only PAM analysis tools (not part of the shipped project)
+/tools
+
 # Build output
 build_out.txt
 /.vs

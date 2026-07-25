@@ -12,10 +12,14 @@
 #include <mutex>
 #include <atomic>
 #include <algorithm>
+#include <vector>
 
 #include "Helper.h"
 #include "Tree.h"
 #include "MetaFile.h"
+#include "PamExport.h"
+#include "PamModel.h"
+#include "PamRender.h"
 #include "PazFile.h"
 #include "Setting.h"
 
@@ -30,12 +34,15 @@ name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 // ── Version ──────────────────────────────────────────────────────────────────
-#define APP_VERSION               L"2.3.1"
+#define APP_VERSION               L"2.4.0"
 
 // ── Window layout ────────────────────────────────────────────────────────────
 #define WINDOW_MIN_WIDTH          1100
 #define WINDOW_MIN_HEIGHT         700
-#define DIVIDE_RATIO              0.65f
+#define DIVIDE_RATIO              0.65f   // initial split; app.fDivideRatio tracks it at runtime
+#define SPLITTER_WIDTH            6       // draggable band between tree and preview
+#define DIVIDE_RATIO_MIN          0.15f
+#define DIVIDE_RATIO_MAX          0.85f
 #define STATUSBAR_SECTION_COUNT   3
 #define STATUSBAR_SECTION1        70
 #define STATUSBAR_SECTION2        530
@@ -76,6 +83,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 // ── Menu IDs ─────────────────────────────────────────────────────────────────
 #define ID_MENU_FILE_OPEN        200
 #define ID_MENU_FILE_EXTRACT     201
+#define ID_MENU_FILE_EXPORT      203
 #define ID_MENU_FILE_EXIT        202
 #define ID_MENU_CACHE_REBUILD    210
 #define ID_MENU_CACHE_CLEAR_TEMP 211
@@ -91,6 +99,9 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 // Extensions that have a texture preview
 constexpr const wchar_t* PREVIEW_EXTS[] = { L".dds", L".png", L".bmp" };
 constexpr int PREVIEW_SIZE_LIMIT = 32 * 1024 * 1024;   // 32 MB max for preview
+
+// .pam models get the 3D preview instead
+constexpr int MODEL_SIZE_LIMIT = 64 * 1024 * 1024;     // 64 MB max for a model
 
 // ── Application state ────────────────────────────────────────────────────────
 typedef struct _AppData {
@@ -115,10 +126,29 @@ typedef struct _AppData {
   HBITMAP hPreviewBitmap;
   IWICImagingFactory *pWICFactory;
 
+  // 3D model preview (.pam)
+  std::unique_ptr<kukdh1::PamModel>  CPamModel;
+  kukdh1::PamCamera                  PamCam;
+  kukdh1::PamTarget                  PamTarget;   // kept alive so the depth buffer persists
+  std::vector<kukdh1::PamTexture>    vPamTextures;
+  void  *pPamPixels;      // DIB bits of hPreviewBitmap while a model is shown
+  int    nPamWidth;       // bitmap size == render size (halved while dragging)
+  int    nPamHeight;
+  bool   bPamOrbiting;
+  bool   bPamPanning;
+  POINT  ptPamDragOrigin;
+  bool   bPamWireframe;
+  bool   bPamShowTexture;
+  bool   bPamDirty;       // camera moved; re-rasterise on the next WM_PAINT
+
   // Dark mode brushes
   HBRUSH hBrushBg;     // CLR_DARK_BG   — main window background
   HBRUSH hBrushPanel;  // CLR_DARK_PANEL — control / button background
   HBRUSH hBrushInput;  // CLR_DARK_INPUT — edit / tree background
+
+  // Splitter between the tree and the right-hand panel
+  float fDivideRatio;
+  bool  bSplitterDrag;
 
   // State flags
   std::mutex mtx;
@@ -130,9 +160,13 @@ typedef struct _AppData {
     hStaticInfo(nullptr), hProgressBar(nullptr),
     hPreviewPanel(nullptr), hSearchWnd(nullptr),
     hFont(nullptr), hPreviewBitmap(nullptr), pWICFactory(nullptr),
+    pPamPixels(nullptr), nPamWidth(0), nPamHeight(0),
+    bPamOrbiting(false), bPamPanning(false), bPamWireframe(false),
+    bPamShowTexture(true), bPamDirty(false),
     hBrushBg(nullptr), hBrushPanel(nullptr), hBrushInput(nullptr),
+    fDivideRatio(DIVIDE_RATIO), bSplitterDrag(false),
     bBusy(false)
-  {}
+  { ptPamDragOrigin.x = ptPamDragOrigin.y = 0; }
 
 } AppData;
 

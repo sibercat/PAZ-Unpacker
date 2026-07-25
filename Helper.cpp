@@ -49,6 +49,55 @@ namespace kukdh1 {
     return SUCCEEDED(hr) ? TRUE : FALSE;
   }
 
+  BOOL SaveFileDialog(HWND hParent, LPCWSTR szTitle, LPCWSTR szDefaultName,
+                      const COMDLG_FILTERSPEC *pFilters, UINT uFilterCount,
+                      LPCWSTR szStartPath, UINT &outFilterIndex,
+                      std::wstring &outPath) {
+    IFileSaveDialog *pfd = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&pfd))))
+      return FALSE;
+
+    DWORD dwOptions = 0;
+    pfd->GetOptions(&dwOptions);
+    pfd->SetOptions(dwOptions | FOS_FORCEFILESYSTEM | FOS_OVERWRITEPROMPT);
+    if (szTitle)       pfd->SetTitle(szTitle);
+    if (szDefaultName) pfd->SetFileName(szDefaultName);
+    if (pFilters && uFilterCount) {
+      pfd->SetFileTypes(uFilterCount, pFilters);
+      pfd->SetFileTypeIndex(outFilterIndex ? outFilterIndex : 1);
+    }
+
+    if (szStartPath && szStartPath[0]) {
+      IShellItem *psi = nullptr;
+      if (SUCCEEDED(SHCreateItemFromParsingName(szStartPath, nullptr, IID_PPV_ARGS(&psi)))) {
+        pfd->SetFolder(psi);
+        psi->Release();
+      }
+    }
+
+    HRESULT hr = pfd->Show(hParent);
+    if (FAILED(hr)) { pfd->Release(); return FALSE; }
+
+    UINT idx = 1;
+    pfd->GetFileTypeIndex(&idx);
+
+    IShellItem *psiResult = nullptr;
+    hr = pfd->GetResult(&psiResult);
+    pfd->Release();
+    if (FAILED(hr)) return FALSE;
+
+    PWSTR pszPath = nullptr;
+    hr = psiResult->GetDisplayName(SIGDN_FILESYSPATH, &pszPath);
+    psiResult->Release();
+    if (SUCCEEDED(hr)) {
+      outPath = pszPath;
+      CoTaskMemFree(pszPath);
+      outFilterIndex = idx;
+    }
+    return SUCCEEDED(hr) ? TRUE : FALSE;
+  }
+
   void ParsePath(std::string path, std::vector<std::string> &folders) {
     std::stringstream ss(path);
 

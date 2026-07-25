@@ -22,10 +22,19 @@ DWORD   WINAPI   CheckUpdateThread(LPVOID arg);
 void             OpenPazFolder(HWND hWnd, const std::wstring &folderPath);
 void             ShowSettingsDialog(HWND hParent);
 void             ShowSearchWindow(HWND hParent);
+void             InvalidateFileNodeCache();
 WNDPROC          g_fnOrigStatusBarProc = nullptr;  // original statusbar WndProc for subclass
 WNDPROC          g_fnOrigHeaderProc    = nullptr;  // original ListView header WndProc for subclass
 void    UpdatePreview(kukdh1::Tree *pTree);
 HBITMAP LoadWICBitmap(const std::wstring &path, int maxW, int maxH);
+void    ClearPamPreview();
+bool    RenderPamPreview();
+void    LoadPamTextures(const kukdh1::PamModel &model,
+                        std::vector<kukdh1::PamTexture> &out);
+bool    LoadTexturePixels(const std::wstring &path, kukdh1::PamTexture &out);
+void    ExportSelectedModel(HWND hWnd, kukdh1::Tree *pTree);
+DWORD   WINAPI   ExportThread(LPVOID arg);
+static const std::vector<kukdh1::Tree *> &GetCachedFileNodes();
 
 // ── Global ────────────────────────────────────────────────────────────────────
 AppData app;
@@ -73,7 +82,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpszCmd
 
   // Register preview panel window class
   WNDCLASS previewClass = {};
-  previewClass.style         = CS_HREDRAW | CS_VREDRAW;
+  previewClass.style         = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
   previewClass.lpfnWndProc   = PreviewWndProc;
   previewClass.hInstance     = hInstance;
   previewClass.hbrBackground = (HBRUSH)GetStockObject(DKGRAY_BRUSH);
@@ -221,8 +230,105 @@ LRESULT CALLBACK PreviewWndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM 
     case WM_ERASEBKGND:
       return 1;   // handled in WM_PAINT — prevents flicker
 
+    // ── 3D model interaction ────────────────────────────────────────────────
+    // Only active while a .pam model is loaded; textures ignore these.
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+      if (app.CPamModel) {
+        if (iMessage == WM_LBUTTONDOWN) app.bPamOrbiting = true;
+        else                            app.bPamPanning  = true;
+        app.ptPamDragOrigin.x = GET_X_LPARAM(lParam);
+        app.ptPamDragOrigin.y = GET_Y_LPARAM(lParam);
+        SetCapture(hWnd);
+      }
+      return 0;
+
+    case WM_LBUTTONUP:
+    case WM_RBUTTONUP:
+      if (app.bPamOrbiting || app.bPamPanning) {
+        app.bPamOrbiting = false;
+        app.bPamPanning  = false;
+        ReleaseCapture();
+        // Drag over — redraw at full resolution.
+        app.bPamDirty = true;
+        InvalidateRect(hWnd, nullptr, FALSE);
+      }
+      return 0;
+
+    // Camera changes only mark the view dirty and invalidate. The actual
+    // rasterise happens in WM_PAINT, which Windows synthesises only once the
+    // queue is empty — rendering here instead would let mouse-move messages
+    // pile up faster than frames complete.
+    case WM_MOUSEMOVE:
+      if (app.CPamModel && (app.bPamOrbiting || app.bPamPanning)) {
+        int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam);
+        int dx = x - app.ptPamDragOrigin.x;
+        int dy = y - app.ptPamDragOrigin.y;
+        app.ptPamDragOrigin.x = x;
+        app.ptPamDragOrigin.y = y;
+
+        if (app.bPamOrbiting) {
+          app.PamCam.Orbit(dx * 0.010f, dy * 0.010f);
+        }
+        else {
+          RECT rc; GetClientRect(hWnd, &rc);
+          int w = rc.right - rc.left, h = rc.bottom - rc.top;
+          if (w > 0 && h > 0) {
+            app.PamCam.fPanX += (float)dx / w;
+            app.PamCam.fPanY += (float)dy / h;
+          }
+        }
+        app.bPamDirty = true;
+        InvalidateRect(hWnd, nullptr, FALSE);
+      }
+      return 0;
+
+    case WM_MOUSEWHEEL:
+      if (app.CPamModel) {
+        int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        app.PamCam.Zoom(delta > 0 ? 1.15f : 1.0f / 1.15f);
+        app.bPamDirty = true;
+        InvalidateRect(hWnd, nullptr, FALSE);
+      }
+      return 0;
+
+    // Double-click resets the view; middle-click cycles textured/solid/wireframe.
+    case WM_LBUTTONDBLCLK:
+      if (app.CPamModel) {
+        app.PamCam.Reset();
+        app.bPamDirty = true;
+        InvalidateRect(hWnd, nullptr, FALSE);
+      }
+      return 0;
+
+    case WM_MBUTTONDOWN:
+      if (app.CPamModel) {
+        // textured -> solid -> wireframe -> textured
+        if (app.bPamShowTexture)      { app.bPamShowTexture = false; app.bPamWireframe = false; }
+        else if (!app.bPamWireframe)  { app.bPamWireframe = true; }
+        else                          { app.bPamShowTexture = true; app.bPamWireframe = false; }
+        app.bPamDirty = true;
+        InvalidateRect(hWnd, nullptr, FALSE);
+      }
+      return 0;
+
+    case WM_SIZE:
+      // Re-render at the new panel size so the model stays sharp.
+      if (app.CPamModel) {
+        app.bPamDirty = true;
+        InvalidateRect(hWnd, nullptr, FALSE);
+      }
+      return 0;
+
     case WM_PAINT:
       {
+        // Rasterise here rather than in the input handlers so consecutive
+        // mouse moves collapse into a single frame.
+        if (app.CPamModel && app.bPamDirty) {
+          RenderPamPreview();
+          app.bPamDirty = false;
+        }
+
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
         RECT rc;
@@ -235,11 +341,30 @@ LRESULT CALLBACK PreviewWndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM 
           HDC hdcMem = CreateCompatibleDC(hdc);
           HBITMAP hOld = (HBITMAP)SelectObject(hdcMem, app.hPreviewBitmap);
 
-          // Dark grey background, image centred
+          // A model always fills the panel — the bitmap is the whole frame, at
+          // full size or (while dragging) half size. A texture keeps its own
+          // size and gets centred.
+          bool isModel = (app.CPamModel != nullptr);
+          int x = isModel ? 0 : (rc.right  - bm.bmWidth)  / 2;
+          int y = isModel ? 0 : (rc.bottom - bm.bmHeight) / 2;
+          int dw = isModel ? rc.right  : bm.bmWidth;
+          int dh = isModel ? rc.bottom : bm.bmHeight;
+
+          // Fill only the margins around the image. Filling the whole panel and
+          // then blitting over it paints every pixel twice, which is visible as
+          // a flash while orbiting a model (the bitmap covers the full panel).
+          int saved = SaveDC(hdc);
+          ExcludeClipRect(hdc, x, y, x + dw, y + dh);
           FillRect(hdc, &rc, (HBRUSH)GetStockObject(DKGRAY_BRUSH));
-          int x = (rc.right  - bm.bmWidth)  / 2;
-          int y = (rc.bottom - bm.bmHeight) / 2;
-          BitBlt(hdc, x, y, bm.bmWidth, bm.bmHeight, hdcMem, 0, 0, SRCCOPY);
+          RestoreDC(hdc, saved);
+
+          if (bm.bmWidth != dw || bm.bmHeight != dh) {
+            SetStretchBltMode(hdc, COLORONCOLOR);   // fast; this frame is transient
+            StretchBlt(hdc, x, y, dw, dh, hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+          }
+          else {
+            BitBlt(hdc, x, y, dw, dh, hdcMem, 0, 0, SRCCOPY);
+          }
 
           SelectObject(hdcMem, hOld);
           DeleteDC(hdcMem);
@@ -250,6 +375,18 @@ LRESULT CALLBACK PreviewWndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM 
           SetBkMode(hdc, TRANSPARENT);
           if (app.hFont) SelectObject(hdc, app.hFont);
           DrawText(hdc, L"No preview", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+
+        // Control hint while a model is on screen
+        if (app.CPamModel) {
+          SetTextColor(hdc, CLR_DARK_TEXT2);
+          SetBkMode(hdc, TRANSPARENT);
+          if (app.hFont) SelectObject(hdc, app.hFont);
+          RECT rcHint = rc;
+          rcHint.bottom -= 4;
+          DrawText(hdc,
+            L"drag: orbit   right-drag: pan   wheel: zoom   dbl-click: reset   mid-click: texture/solid/wire",
+            -1, &rcHint, DT_CENTER | DT_BOTTOM | DT_SINGLELINE);
         }
 
         EndPaint(hWnd, &ps);
@@ -355,6 +492,7 @@ BOOL Cls_OnCreate(HWND hWnd, LPCREATESTRUCT lpCreateStruct) {
     HMENU hFile  = CreatePopupMenu();
     AppendMenuW(hFile, MF_STRING,    ID_MENU_FILE_OPEN,    L"&Open Folder...");
     AppendMenuW(hFile, MF_STRING,    ID_MENU_FILE_EXTRACT, L"&Extract...");
+    AppendMenuW(hFile, MF_STRING,    ID_MENU_FILE_EXPORT,  L"Export &Model (OBJ / FBX)...");
     AppendMenuW(hFile, MF_SEPARATOR, 0,                    nullptr);
     AppendMenuW(hFile, MF_STRING,    ID_MENU_FILE_EXIT,    L"E&xit");
 
@@ -398,9 +536,22 @@ void Cls_OnDestroy(HWND hWnd) {
   ExitProcess(0);
 }
 
+// Splitter band occupies [SplitterX(cx), SplitterX(cx) + SPLITTER_WIDTH).
+static int SplitterX(int cx) {
+  int x = (int)(cx * app.fDivideRatio + 0.5f) - SPLITTER_WIDTH / 2;
+  int lo = (int)(cx * DIVIDE_RATIO_MIN);
+  int hi = (int)(cx * DIVIDE_RATIO_MAX) - SPLITTER_WIDTH;
+  if (x < lo) x = lo;
+  if (x > hi) x = hi;
+  return x;
+}
+
 void Cls_OnSize(HWND hWnd, UINT state, int cx, int cy) {
-  int nTreeWidth  = (int)(cx * DIVIDE_RATIO + 0.5f);
-  int nRightWidth = cx - nTreeWidth;
+  int nSplitX     = SplitterX(cx);
+  int nTreeWidth  = nSplitX;                              // gap belongs to the splitter
+  int nRightX     = nSplitX + SPLITTER_WIDTH;
+  int nRightWidth = cx - nRightX;
+  if (nRightWidth < 1) nRightWidth = 1;
   int nStatusH    = GetSystemMetrics(SM_CYMENU) + GetSystemMetrics(SM_CYBORDER) * 2;
   int nContentH   = cy - nStatusH - HEADER_HEIGHT;
   if (nContentH < 1) nContentH = 1;
@@ -413,9 +564,9 @@ void Cls_OnSize(HWND hWnd, UINT state, int cx, int cy) {
   MoveWindow(app.hButtonExctact, nHalfW,  0, nTreeWidth - nHalfW, LOAD_HEIGHT, TRUE);
 
   // Main content area (directly below Load button)
-  MoveWindow(app.hTreeFileSystem, 0,          HEADER_HEIGHT,          nTreeWidth,  nContentH, TRUE);
-  MoveWindow(app.hStaticInfo,     nTreeWidth, HEADER_HEIGHT,          nRightWidth, nInfoH,     TRUE);
-  MoveWindow(app.hPreviewPanel,   nTreeWidth, HEADER_HEIGHT + nInfoH, nRightWidth, nPreviewH,  TRUE);
+  MoveWindow(app.hTreeFileSystem, 0,       HEADER_HEIGHT,          nTreeWidth,  nContentH, TRUE);
+  MoveWindow(app.hStaticInfo,     nRightX, HEADER_HEIGHT,          nRightWidth, nInfoH,     TRUE);
+  MoveWindow(app.hPreviewPanel,   nRightX, HEADER_HEIGHT + nInfoH, nRightWidth, nPreviewH,  TRUE);
   MoveWindow(app.hStatusBar, 0, 0, 0, 0, TRUE);
 }
 
@@ -471,6 +622,17 @@ void Cls_OnCommand(HWND hWnd, int id, HWND hwndCtl, UINT codeNotify) {
             CloseHandle(hThread);
           }
         }
+      }
+      break;
+
+    case ID_MENU_FILE_EXPORT:
+      {
+        if (app.bBusy) break;
+        TVITEM tvi = {};
+        tvi.hItem = TreeView_GetSelection(app.hTreeFileSystem);
+        tvi.mask  = TVIF_PARAM;
+        TreeView_GetItem(app.hTreeFileSystem, &tvi);
+        ExportSelectedModel(hWnd, (kukdh1::Tree *)tvi.lParam);
       }
       break;
 
@@ -626,9 +788,61 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
         HMENU hSub = (HMENU)wParam;
         bool hasPaz = (app.CTree != nullptr && !app.bBusy);
         EnableMenuItem(hSub, ID_MENU_FILE_EXTRACT,     MF_BYCOMMAND | (hasPaz ? MF_ENABLED : MF_GRAYED));
+        EnableMenuItem(hSub, ID_MENU_FILE_EXPORT,      MF_BYCOMMAND | (hasPaz ? MF_ENABLED : MF_GRAYED));
         EnableMenuItem(hSub, ID_MENU_CACHE_REBUILD,    MF_BYCOMMAND | (hasPaz ? MF_ENABLED : MF_GRAYED));
         EnableMenuItem(hSub, ID_MENU_CACHE_CLEAR_TEMP, MF_BYCOMMAND | (!app.bBusy ? MF_ENABLED : MF_GRAYED));
         EnableMenuItem(hSub, ID_MENU_SETTINGS,         MF_BYCOMMAND | (!app.bBusy ? MF_ENABLED : MF_GRAYED));
+      }
+      return 0;
+
+    // ── Splitter: drag the band between the tree and the preview ─────────────
+    case WM_SETCURSOR:
+      if ((HWND)wParam == hWnd) {
+        POINT pt;
+        GetCursorPos(&pt);
+        ScreenToClient(hWnd, &pt);
+        RECT rc; GetClientRect(hWnd, &rc);
+        int sx = SplitterX(rc.right);
+        if (pt.y >= HEADER_HEIGHT && pt.x >= sx && pt.x < sx + SPLITTER_WIDTH) {
+          SetCursor(LoadCursor(nullptr, IDC_SIZEWE));
+          return TRUE;
+        }
+      }
+      break;
+
+    case WM_LBUTTONDOWN:
+      {
+        int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam);
+        RECT rc; GetClientRect(hWnd, &rc);
+        int sx = SplitterX(rc.right);
+        if (y >= HEADER_HEIGHT && x >= sx && x < sx + SPLITTER_WIDTH) {
+          app.bSplitterDrag = true;
+          SetCapture(hWnd);
+        }
+      }
+      return 0;
+
+    case WM_MOUSEMOVE:
+      if (app.bSplitterDrag) {
+        RECT rc; GetClientRect(hWnd, &rc);
+        if (rc.right > 0) {
+          float ratio = (float)(GET_X_LPARAM(lParam) + SPLITTER_WIDTH / 2) / rc.right;
+          if (ratio < DIVIDE_RATIO_MIN) ratio = DIVIDE_RATIO_MIN;
+          if (ratio > DIVIDE_RATIO_MAX) ratio = DIVIDE_RATIO_MAX;
+          if (ratio != app.fDivideRatio) {
+            app.fDivideRatio = ratio;
+            Cls_OnSize(hWnd, 0, rc.right, rc.bottom);
+            app.bPamDirty = true;   // preview panel changed size
+            InvalidateRect(hWnd, nullptr, FALSE);
+          }
+        }
+      }
+      return 0;
+
+    case WM_LBUTTONUP:
+      if (app.bSplitterDrag) {
+        app.bSplitterDrag = false;
+        ReleaseCapture();
       }
       return 0;
 
@@ -725,14 +939,36 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
           tvi.mask  = TVIF_PARAM;
           TreeView_GetItem(app.hTreeFileSystem, &tvi);
           if (tvi.lParam) {
+            kukdh1::Tree *pNode = (kukdh1::Tree *)tvi.lParam;
+
+            // Offer the model export only on .pam files.
+            bool isPam = false;
+            if (pNode->GetType() == kukdh1::Tree::TREE_TYPE_FILE) {
+              const std::string &fp = pNode->GetFileInfo().sFullPath;
+              if (fp.size() >= 4) {
+                std::string e = fp.substr(fp.size() - 4);
+                std::transform(e.begin(), e.end(), e.begin(),
+                               [](unsigned char c) { return (char)::tolower(c); });
+                isPam = (e == ".pam");
+              }
+            }
+
             HMENU hMenu = CreatePopupMenu();
             AppendMenuW(hMenu, MF_STRING | (app.bBusy ? MF_GRAYED : 0), 1, L"Extract");
+            if (isPam)
+              AppendMenuW(hMenu, MF_STRING | (app.bBusy ? MF_GRAYED : 0), 2,
+                          L"Export Model (OBJ / FBX)...");
+
             int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, nullptr);
             DestroyMenu(hMenu);
+
             bool expected = false;
             if (cmd == 1 && app.bBusy.compare_exchange_strong(expected, true)) {
               HANDLE hThread = CreateThread(nullptr, 0, ExtractThread, (LPVOID)tvi.lParam, 0, nullptr);
               CloseHandle(hThread);
+            }
+            else if (cmd == 2 && !app.bBusy) {
+              ExportSelectedModel(hWnd, pNode);
             }
           }
         }
@@ -798,6 +1034,7 @@ void OpenPazFolder(HWND hWnd, const std::wstring &folderPath) {
   {
     // app.mtx guards app.CTree against an in-flight SearchThread still walking it
     std::lock_guard<std::mutex> lock(app.mtx);
+    InvalidateFileNodeCache();   // holds raw pointers into the tree we're freeing
     app.CTree.reset();
     app.CMeta.reset();
   }
@@ -855,6 +1092,7 @@ DWORD WINAPI CacheLoadThread(LPVOID) {
     DeleteFileW(kukdh1::CachePath(app.wsFolderPath).c_str());
     {
       std::lock_guard<std::mutex> lock(app.mtx);
+      InvalidateFileNodeCache();
       app.CTree = std::make_unique<kukdh1::Tree>(kukdh1::Tree::TREE_TYPE_ROOT);
     }
     EnableWindow(app.hTreeFileSystem, TRUE);
@@ -1531,7 +1769,7 @@ DWORD WINAPI CheckUpdateThread(LPVOID arg) {
 
   // Strip leading 'v' for comparison with APP_VERSION (which has no 'v')
   std::string tagStripped = (!tagA.empty() && tagA[0] == 'v') ? tagA.substr(1) : tagA;
-  constexpr char appVerA[] = "2.3.1";  // must match APP_VERSION
+  constexpr char appVerA[] = "2.4.0";  // must match APP_VERSION
 
   // Compare numerically — a remote tag older than or equal to this build
   // (e.g. running a dev build ahead of the latest release) is "up to date".
@@ -1909,6 +2147,290 @@ DWORD WINAPI ExtractThread(LPVOID arg) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Model export (OBJ / FBX)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Re-encodes an image to PNG at its native resolution. The preview decoder
+// caps textures at 512px, which is fine on screen but would throw away detail
+// in an export.
+static bool SaveTextureAsPng(const std::wstring &srcPath, const std::wstring &dstPath) {
+  if (!app.pWICFactory) return false;
+
+  IWICBitmapDecoder     *decoder = nullptr;
+  IWICBitmapFrameDecode *frame   = nullptr;
+  IWICFormatConverter   *conv    = nullptr;
+  IWICBitmapEncoder     *encoder = nullptr;
+  IWICBitmapFrameEncode *outFrame = nullptr;
+  IWICStream            *stream  = nullptr;
+  bool ok = false;
+
+  auto cleanup = [&]() {
+    if (outFrame) outFrame->Release();
+    if (encoder)  encoder->Release();
+    if (stream)   stream->Release();
+    if (conv)     conv->Release();
+    if (frame)    frame->Release();
+    if (decoder)  decoder->Release();
+  };
+
+  if (FAILED(app.pWICFactory->CreateDecoderFromFilename(
+        srcPath.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder))) {
+    cleanup(); return false;
+  }
+  if (FAILED(decoder->GetFrame(0, &frame))) { cleanup(); return false; }
+
+  if (FAILED(app.pWICFactory->CreateFormatConverter(&conv))) { cleanup(); return false; }
+  WICPixelFormatGUID srcFmt = {};
+  frame->GetPixelFormat(&srcFmt);
+  BOOL can = FALSE;
+  conv->CanConvert(srcFmt, GUID_WICPixelFormat32bppBGRA, &can);
+  if (!can) { cleanup(); return false; }
+  if (FAILED(conv->Initialize(frame, GUID_WICPixelFormat32bppBGRA,
+        WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))) {
+    cleanup(); return false;
+  }
+
+  if (FAILED(app.pWICFactory->CreateStream(&stream))) { cleanup(); return false; }
+  if (FAILED(stream->InitializeFromFilename(dstPath.c_str(), GENERIC_WRITE))) {
+    cleanup(); return false;
+  }
+  if (FAILED(app.pWICFactory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder))) {
+    cleanup(); return false;
+  }
+  if (FAILED(encoder->Initialize(stream, WICBitmapEncoderNoCache))) { cleanup(); return false; }
+  if (FAILED(encoder->CreateNewFrame(&outFrame, nullptr)))          { cleanup(); return false; }
+  if (FAILED(outFrame->Initialize(nullptr)))                        { cleanup(); return false; }
+
+  UINT w = 0, h = 0;
+  conv->GetSize(&w, &h);
+  outFrame->SetSize(w, h);
+  WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppBGRA;
+  outFrame->SetPixelFormat(&fmt);
+
+  if (SUCCEEDED(outFrame->WriteSource(conv, nullptr)) &&
+      SUCCEEDED(outFrame->Commit()) &&
+      SUCCEEDED(encoder->Commit())) {
+    ok = true;
+  }
+
+  cleanup();
+  return ok;
+}
+
+// Extracts every texture the model references into outDir as PNG. Fills
+// vOutFiles with the file name written per submesh (empty when unresolved).
+static void ExportModelTextures(const kukdh1::PamModel &model,
+                                const std::wstring &wsOutDir,
+                                kukdh1::PamTextureFileList &vOutFiles) {
+  vOutFiles.assign(model.vSubmeshes.size(), std::string());
+  if (!app.CTree) return;
+
+  WCHAR tempDir[MAX_PATH];
+  GetTempPath(MAX_PATH, tempDir);
+  kukdh1::CryptICE cipher(ICE_KEY, ICE_KEY_LEN);
+
+  // name -> written png file (so a texture shared by several submeshes is
+  // extracted and converted only once)
+  std::unordered_map<std::string, std::string> done;
+
+  for (size_t i = 0; i < model.vSubmeshes.size(); i++) {
+    const std::string &texName = model.vSubmeshes[i].sTexture;
+    if (texName.empty()) continue;
+
+    std::string key = texName;
+    std::transform(key.begin(), key.end(), key.begin(),
+                   [](unsigned char c) { return (char)::tolower(c); });
+
+    auto it = done.find(key);
+    if (it != done.end()) { vOutFiles[i] = it->second; continue; }
+
+    // Locate the texture anywhere in the archive by file name.
+    kukdh1::Tree *node = nullptr;
+    for (auto *n : GetCachedFileNodes()) {
+      const std::string &nm = n->GetName();
+      if (nm.size() == texName.size() && _stricmp(nm.c_str(), texName.c_str()) == 0) {
+        node = n;
+        break;
+      }
+    }
+    if (!node) { done[key] = std::string(); continue; }
+
+    std::wstring wTexName;
+    kukdh1::ConvertWidechar(texName, wTexName);
+    std::wstring tempPath = std::wstring(tempDir) + L"paz_export_" + wTexName;
+
+    std::string pngName;
+    if (ExtractFile(tempPath, node->GetFileInfo(), cipher)) {
+      std::wstring wPng = wTexName;
+      size_t dot = wPng.find_last_of(L'.');
+      if (dot != std::wstring::npos) wPng = wPng.substr(0, dot);
+      wPng += L".png";
+
+      if (SaveTextureAsPng(tempPath, wsOutDir + L"\\" + wPng)) {
+        std::string narrow;
+        narrow.reserve(wPng.size());
+        for (wchar_t c : wPng) narrow.push_back((c < 128) ? (char)c : '_');
+        pngName = narrow;
+      }
+      DeleteFile(tempPath.c_str());
+    }
+
+    done[key]   = pngName;
+    vOutFiles[i] = pngName;
+  }
+}
+
+struct ExportParams {
+  kukdh1::Tree           *pTree;
+  std::wstring            wsPath;
+  kukdh1::PamExportFormat format;
+};
+
+DWORD WINAPI ExportThread(LPVOID arg) {
+  CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+  std::unique_ptr<ExportParams> p(reinterpret_cast<ExportParams *>(arg));
+
+  SendMessage(app.hStatusBar, SB_SETTEXT, 0,
+    (LPARAM)app.CSetting.getString(kukdh1::Setting::ID_STATUS_BUSY).c_str());
+  SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Exporting model...");
+
+  std::wstring msg;
+  bool ok = false;
+
+  // Extract and parse the .pam fresh: the preview may be showing a different
+  // file, or nothing at all.
+  const kukdh1::FileInfo &info = p->pTree->GetFileInfo();
+  size_t slash = info.sFullPath.rfind('/');
+  std::string name = (slash != std::string::npos)
+    ? info.sFullPath.substr(slash + 1) : info.sFullPath;
+  std::wstring wName;
+  kukdh1::ConvertWidechar(name, wName);
+
+  WCHAR tempDir[MAX_PATH];
+  GetTempPath(MAX_PATH, tempDir);
+  std::wstring tempPath = std::wstring(tempDir) + L"paz_export_" + wName;
+
+  kukdh1::CryptICE cipher(ICE_KEY, ICE_KEY_LEN);
+  if (!ExtractFile(tempPath, info, cipher)) {
+    msg = L"Could not extract the model from the archive.";
+  }
+  else {
+    kukdh1::PamModel model;
+    bool loaded = model.Load(tempPath);
+    DeleteFile(tempPath.c_str());
+
+    if (!loaded || model.IsEmpty()) {
+      msg = L"The model could not be parsed.";
+    }
+    else {
+      std::wstring dir = std::filesystem::path(p->wsPath).parent_path().wstring();
+
+      SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Exporting textures...");
+      kukdh1::PamTextureFileList texFiles;
+      ExportModelTextures(model, dir, texFiles);
+
+      size_t texOk = 0;
+      for (const auto &t : texFiles) if (!t.empty()) texOk++;
+
+      SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Writing model file...");
+      std::wstring err;
+      if (kukdh1::ExportModel(model, p->wsPath, p->format, texFiles, err)) {
+        ok = true;
+        WCHAR buf[256];
+        swprintf_s(buf,
+          L"Exported %zu verts, %zu tris, %zu material(s), %zu/%zu textures.",
+          model.vVertices.size(), model.vIndices.size() / 3,
+          model.vSubmeshes.size(), texOk, texFiles.size());
+        msg = buf;
+      }
+      else {
+        msg = err.empty() ? L"The export failed." : err;
+      }
+    }
+  }
+
+  SendMessage(app.hStatusBar, SB_SETTEXT, 0,
+    (LPARAM)app.CSetting.getString(kukdh1::Setting::ID_STATUS_IDLE).c_str());
+  SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)(ok ? L"Export complete" : L"Export failed"));
+
+  MessageBoxW(nullptr, msg.c_str(), ok ? L"Export Complete" : L"Export Failed",
+              MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONERROR));
+
+  app.bBusy = false;
+  CoUninitialize();
+  return 0;
+}
+
+// Validates the selection, asks for a destination, then hands off to the
+// worker thread. The file type chosen in the dialog selects the format.
+void ExportSelectedModel(HWND hWnd, kukdh1::Tree *pTree) {
+  if (!pTree || pTree->GetType() != kukdh1::Tree::TREE_TYPE_FILE) {
+    MessageBoxW(hWnd, L"Select a .pam model file in the tree first.",
+                L"Export Model", MB_OK | MB_ICONINFORMATION);
+    return;
+  }
+
+  const std::string &full = pTree->GetFileInfo().sFullPath;
+  std::string ext = (full.size() >= 4) ? full.substr(full.size() - 4) : "";
+  std::transform(ext.begin(), ext.end(), ext.begin(),
+                 [](unsigned char c) { return (char)::tolower(c); });
+  if (ext != ".pam") {
+    MessageBoxW(hWnd,
+      L"Only .pam model files can be exported.\r\n\r\n"
+      L"Select a .pam file in the tree and try again.",
+      L"Export Model", MB_OK | MB_ICONINFORMATION);
+    return;
+  }
+
+  // Suggest the model's own name, minus the .pam extension.
+  size_t slash = full.rfind('/');
+  std::string base = (slash != std::string::npos) ? full.substr(slash + 1) : full;
+  if (base.size() > 4) base = base.substr(0, base.size() - 4);
+  std::wstring wBase;
+  kukdh1::ConvertWidechar(base, wBase);
+
+  const COMDLG_FILTERSPEC filters[] = {
+    { L"Wavefront OBJ (*.obj)",  L"*.obj" },
+    { L"Autodesk FBX (*.fbx)",   L"*.fbx" },
+  };
+
+  std::wstring startDir;
+  app.CSetting.getData(SETTING_LAST_EXPORT, startDir, L"");
+
+  UINT filterIndex = 1;
+  std::wstring outPath;
+  if (!kukdh1::SaveFileDialog(hWnd, L"Export Model", (wBase + L".obj").c_str(),
+                              filters, ARRAYSIZE(filters), startDir.c_str(),
+                              filterIndex, outPath))
+    return;
+
+  kukdh1::PamExportFormat fmt = (filterIndex == 2) ? kukdh1::PAM_EXPORT_FBX
+                                                   : kukdh1::PAM_EXPORT_OBJ;
+
+  // The dialog does not always append the extension when the name already
+  // contains a dot, so make sure it matches the chosen type.
+  std::filesystem::path outFs(outPath);
+  std::wstring want = std::wstring(L".") + kukdh1::ExportExtension(fmt);
+  std::wstring have = outFs.extension().wstring();
+  std::transform(have.begin(), have.end(), have.begin(), ::towlower);
+  if (have != want) {
+    outFs.replace_extension(want);
+    outPath = outFs.wstring();
+  }
+
+  app.CSetting.setData(SETTING_LAST_EXPORT, outFs.parent_path().wstring());
+  app.CSetting.Save();
+
+  bool expected = false;
+  if (!app.bBusy.compare_exchange_strong(expected, true)) return;
+
+  auto *p = new ExportParams{ pTree, outPath, fmt };
+  HANDLE h = CreateThread(nullptr, 0, ExportThread, p, 0, nullptr);
+  if (h) CloseHandle(h);
+  else { delete p; app.bBusy = false; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Lazy-load tree expansion thread
 // ─────────────────────────────────────────────────────────────────────────────
 DWORD WINAPI AddThread(LPVOID arg) {
@@ -2144,12 +2666,274 @@ HBITMAP LoadWICBitmap(const std::wstring &path, int maxW, int maxH) {
   return hResult;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 3D model preview (.pam)
+// Renders with the software rasteriser straight into a DIB section, which the
+// preview panel then blits — same path the texture preview already uses.
+// ─────────────────────────────────────────────────────────────────────────────
+void ClearPamPreview() {
+  app.CPamModel.reset();
+  app.vPamTextures.clear();
+  app.PamTarget.pPixels = nullptr;
+  app.PamTarget.nWidth  = 0;
+  app.PamTarget.nHeight = 0;
+  app.pPamPixels   = nullptr;
+  app.nPamWidth    = 0;
+  app.nPamHeight   = 0;
+  app.bPamOrbiting = false;
+  app.bPamPanning  = false;
+  app.bPamDirty    = false;
+}
+
+// Decodes an image file to raw top-down 0xAARRGGBB pixels, downscaled so the
+// longest edge is at most PAM_TEXTURE_MAX. Uses the same WIC path as the
+// texture preview, so every DDS variant the preview handles works here too.
+bool LoadTexturePixels(const std::wstring &path, kukdh1::PamTexture &out) {
+  out.nWidth = out.nHeight = 0;
+  out.vPixels.clear();
+  if (!app.pWICFactory) return false;
+
+  IWICBitmapDecoder     *decoder   = nullptr;
+  IWICBitmapFrameDecode *frame     = nullptr;
+  IWICFormatConverter   *converter = nullptr;
+  IWICBitmapScaler      *scaler    = nullptr;
+  bool ok = false;
+
+  auto cleanup = [&]() {
+    if (scaler)    scaler->Release();
+    if (converter) converter->Release();
+    if (frame)     frame->Release();
+    if (decoder)   decoder->Release();
+  };
+
+  if (FAILED(app.pWICFactory->CreateDecoderFromFilename(
+        path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder))) {
+    cleanup();
+    return false;
+  }
+  if (FAILED(decoder->GetFrame(0, &frame))) { cleanup(); return false; }
+
+  UINT srcW = 0, srcH = 0;
+  if (FAILED(frame->GetSize(&srcW, &srcH)) || srcW == 0 || srcH == 0) {
+    cleanup();
+    return false;
+  }
+
+  // Fit inside the preview texture budget, never upscale.
+  float scale = (std::min)((float)kukdh1::PAM_TEXTURE_MAX / srcW,
+                           (float)kukdh1::PAM_TEXTURE_MAX / srcH);
+  if (scale > 1.0f) scale = 1.0f;
+  UINT dstW = (std::max)(1u, (UINT)(srcW * scale));
+  UINT dstH = (std::max)(1u, (UINT)(srcH * scale));
+
+  if (FAILED(app.pWICFactory->CreateFormatConverter(&converter))) { cleanup(); return false; }
+
+  WICPixelFormatGUID srcFmt = {};
+  frame->GetPixelFormat(&srcFmt);
+  BOOL canConvert = FALSE;
+  converter->CanConvert(srcFmt, GUID_WICPixelFormat32bppBGRA, &canConvert);
+  if (!canConvert) { cleanup(); return false; }
+
+  if (FAILED(converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA,
+        WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))) {
+    cleanup();
+    return false;
+  }
+
+  if (FAILED(app.pWICFactory->CreateBitmapScaler(&scaler))) { cleanup(); return false; }
+  if (FAILED(scaler->Initialize(converter, dstW, dstH, WICBitmapInterpolationModeFant))) {
+    cleanup();
+    return false;
+  }
+
+  out.nWidth  = (int)dstW;
+  out.nHeight = (int)dstH;
+  out.vPixels.resize((size_t)dstW * dstH);
+
+  WICRect rc = { 0, 0, (INT)dstW, (INT)dstH };
+  if (SUCCEEDED(scaler->CopyPixels(&rc, dstW * 4, (UINT)(out.vPixels.size() * 4),
+                                   reinterpret_cast<BYTE *>(out.vPixels.data())))) {
+    ok = true;
+    kukdh1::PrepareTexture(out);
+  }
+  else {
+    out.nWidth = out.nHeight = 0;
+    out.vPixels.clear();
+  }
+
+  cleanup();
+  return ok;
+}
+
+// Flattened file-node list, cached because walking 800k+ tree nodes on every
+// model selection is far too slow. Holds raw pointers into app.CTree, so it
+// MUST be cleared whenever that tree is destroyed (see OpenPazFolder).
+static std::vector<kukdh1::Tree *> g_allFileNodes;
+
+void InvalidateFileNodeCache() {
+  g_allFileNodes.clear();
+  g_allFileNodes.shrink_to_fit();
+}
+
+static const std::vector<kukdh1::Tree *> &GetCachedFileNodes() {
+  if (g_allFileNodes.empty() && app.CTree)
+    app.CTree->GetFileNodeList(g_allFileNodes);
+  return g_allFileNodes;
+}
+
+// Resolves each submesh's texture name against the loaded tree, extracts it to
+// %TEMP% and decodes it. Textures live in a different folder than the model, so
+// they are matched on file name only — the same rule PAM co-extraction uses.
+void LoadPamTextures(const kukdh1::PamModel &model,
+                     std::vector<kukdh1::PamTexture> &out) {
+  out.clear();
+  out.resize(model.vSubmeshes.size());
+  if (!app.CTree) return;
+
+  // Distinct texture names this model needs (usually 1-6, at most ~34).
+  std::vector<std::string> wanted;
+  for (const auto &sm : model.vSubmeshes) {
+    if (sm.sTexture.empty()) continue;
+    bool dup = false;
+    for (const auto &w : wanted)
+      if (_stricmp(w.c_str(), sm.sTexture.c_str()) == 0) { dup = true; break; }
+    if (!dup) wanted.push_back(sm.sTexture);
+  }
+  if (wanted.empty()) return;
+
+  // One pass over the cached node list. The length check rejects almost every
+  // node before the string compare, so this stays cheap even at 800k nodes.
+  std::vector<kukdh1::Tree *> hits(wanted.size(), nullptr);
+  size_t remaining = wanted.size();
+
+  for (auto *n : GetCachedFileNodes()) {
+    const std::string &nm = n->GetName();
+    for (size_t k = 0; k < wanted.size(); k++) {
+      if (hits[k] || nm.size() != wanted[k].size()) continue;
+      if (_stricmp(nm.c_str(), wanted[k].c_str()) == 0) {
+        hits[k] = n;
+        if (--remaining == 0) break;
+      }
+    }
+    if (remaining == 0) break;
+  }
+
+  WCHAR tempDir[MAX_PATH];
+  GetTempPath(MAX_PATH, tempDir);
+  kukdh1::CryptICE cipher(ICE_KEY, ICE_KEY_LEN);
+
+  // Decode each distinct texture once, then share it across submeshes.
+  std::vector<kukdh1::PamTexture> decoded(wanted.size());
+  for (size_t k = 0; k < wanted.size(); k++) {
+    if (!hits[k]) continue;   // texture not present in this archive
+
+    std::wstring wName;
+    kukdh1::ConvertWidechar(wanted[k], wName);
+    std::wstring tempPath = std::wstring(tempDir) + L"paz_preview_tex_" + wName;
+
+    if (ExtractFile(tempPath, hits[k]->GetFileInfo(), cipher)) {
+      LoadTexturePixels(tempPath, decoded[k]);
+      DeleteFile(tempPath.c_str());
+    }
+  }
+
+  for (size_t i = 0; i < model.vSubmeshes.size(); i++) {
+    const std::string &texName = model.vSubmeshes[i].sTexture;
+    if (texName.empty()) continue;
+    for (size_t k = 0; k < wanted.size(); k++) {
+      if (_stricmp(wanted[k].c_str(), texName.c_str()) == 0) {
+        if (decoded[k].IsValid()) out[i] = decoded[k];
+        break;
+      }
+    }
+  }
+}
+
+// (Re)creates the DIB if the panel size changed, then rasterises the model.
+// Returns false if there is nothing to draw.
+bool RenderPamPreview() {
+  if (!app.CPamModel || app.CPamModel->IsEmpty()) return false;
+
+  RECT rc;
+  GetClientRect(app.hPreviewPanel, &rc);
+  int panelW = rc.right - rc.left;
+  int panelH = rc.bottom - rc.top;
+  if (panelW < 2 || panelH < 2) return false;
+
+  // While the camera is being dragged, rasterise at half resolution and let
+  // WM_PAINT stretch the result up. Quartering the pixel count keeps large
+  // panels interactive; the full-resolution frame is drawn as soon as the drag
+  // ends. The bitmap is allocated at the render size rather than the panel
+  // size — a smaller render inside a larger bitmap would leave the previous
+  // frame visible around it.
+  int w = panelW, h = panelH;
+  if (app.bPamOrbiting || app.bPamPanning) {
+    w = (panelW + 1) / 2;
+    h = (panelH + 1) / 2;
+  }
+  if (w < 2) w = 2;
+  if (h < 2) h = 2;
+
+  // Recreate the backing bitmap when the render size changes.
+  if (app.hPreviewBitmap == nullptr || w != app.nPamWidth || h != app.nPamHeight) {
+    if (app.hPreviewBitmap) {
+      DeleteObject(app.hPreviewBitmap);
+      app.hPreviewBitmap = nullptr;
+      app.pPamPixels     = nullptr;
+    }
+
+    BITMAPINFO bmi              = {};
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = w;
+    bmi.bmiHeader.biHeight      = -h;   // top-down, matches the rasteriser
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void *bits = nullptr;
+    HDC hdc = GetDC(nullptr);
+    app.hPreviewBitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    ReleaseDC(nullptr, hdc);
+
+    if (!app.hPreviewBitmap || !bits) {
+      app.hPreviewBitmap = nullptr;
+      app.pPamPixels     = nullptr;
+      return false;
+    }
+    app.pPamPixels = bits;
+    app.nPamWidth  = w;
+    app.nPamHeight = h;
+  }
+
+  // Reuse the persistent target so the depth buffer is not reallocated per frame.
+  app.PamTarget.pPixels = static_cast<uint32_t *>(app.pPamPixels);
+  app.PamTarget.nWidth  = app.nPamWidth;
+  app.PamTarget.nHeight = app.nPamHeight;
+
+  // COLORREF packs as 0x00BBGGRR; the DIB wants 0xAARRGGBB. Swizzle with masks
+  // rather than GetRValue()/GetBValue(), whose BYTE casts trip C4310 here.
+  const uint32_t clrBg = (uint32_t)CLR_DARK_INPUT;
+  const uint32_t bg = 0xFF000000u
+                    | ((clrBg & 0x000000FFu) << 16)   // R
+                    |  (clrBg & 0x0000FF00u)          // G
+                    | ((clrBg & 0x00FF0000u) >> 16);  // B
+
+  kukdh1::PamShadeMode mode = kukdh1::PAM_SHADE_SOLID;
+  if (app.bPamWireframe)        mode = kukdh1::PAM_SHADE_WIREFRAME;
+  else if (app.bPamShowTexture) mode = kukdh1::PAM_SHADE_TEXTURED;
+
+  kukdh1::RenderModel(*app.CPamModel, app.PamCam, app.PamTarget, bg, mode,
+                      &app.vPamTextures);
+  return true;
+}
+
 void UpdatePreview(kukdh1::Tree *pTree) {
   // Don't attempt preview while a background thread (search/load) is running —
   // TVN_SELCHANGED fires spuriously during TreeView_DeleteAllItems/insert.
   if (app.bBusy) return;
 
   // Clear previous preview
+  ClearPamPreview();
   if (app.hPreviewBitmap) {
     DeleteObject(app.hPreviewBitmap);
     app.hPreviewBitmap = nullptr;
@@ -2165,6 +2949,64 @@ void UpdatePreview(kukdh1::Tree *pTree) {
   if (dot == std::string::npos) return;
   std::string ext = info.sFullPath.substr(dot);
   std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c){ return (char)::tolower(c); });
+
+  // ── 3D model preview ──────────────────────────────────────────────────────
+  if (ext == ".pam") {
+    if (info.uiOriginalSize > (uint32_t)MODEL_SIZE_LIMIT) {
+      SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Model too large to preview");
+      return;
+    }
+
+    size_t mslash = info.sFullPath.rfind('/');
+    std::string mname = (mslash != std::string::npos)
+      ? info.sFullPath.substr(mslash + 1) : info.sFullPath;
+    std::wstring wMName;
+    kukdh1::ConvertWidechar(mname, wMName);
+
+    WCHAR mTempDir[MAX_PATH];
+    GetTempPath(MAX_PATH, mTempDir);
+    std::wstring mTempPath = std::wstring(mTempDir) + L"paz_preview_" + wMName;
+
+    kukdh1::CryptICE mCipher(ICE_KEY, ICE_KEY_LEN);
+    if (!ExtractFile(mTempPath, info, mCipher)) {
+      SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Preview: extraction failed");
+      return;
+    }
+
+    auto model = std::make_unique<kukdh1::PamModel>();
+    bool loaded = model->Load(mTempPath);
+    DeleteFile(mTempPath.c_str());
+
+    if (!loaded || model->IsEmpty()) {
+      SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Preview: unsupported model format");
+      return;
+    }
+
+    app.CPamModel = std::move(model);
+    app.PamCam.Reset();
+    LoadPamTextures(*app.CPamModel, app.vPamTextures);
+
+    size_t texOk = 0;
+    for (const auto &t : app.vPamTextures)
+      if (t.IsValid()) texOk++;
+
+    if (RenderPamPreview()) {
+      // Always spell non-ASCII as a \u escape, never as a literal character:
+      // this source is UTF-8 with no BOM, so MSVC decodes raw multi-byte
+      // characters using the ANSI codepage and the status bar shows mojibake.
+      WCHAR msg[160];
+      swprintf_s(msg,
+        L"Model v%u \u2014 %zu verts, %zu tris, %zu material(s), %zu/%zu textures",
+        app.CPamModel->uiVersion,
+        app.CPamModel->vVertices.size(),
+        app.CPamModel->vIndices.size() / 3,
+        app.CPamModel->vSubmeshes.size(),
+        texOk, app.vPamTextures.size());
+      SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)msg);
+    }
+    InvalidateRect(app.hPreviewPanel, nullptr, TRUE);
+    return;
+  }
 
   bool isImage = false;
   for (auto *e : PREVIEW_EXTS) {

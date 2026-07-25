@@ -14,6 +14,7 @@
 
 #define SETTING_LAST_FOLDER         L"last_folder_path"
 #define SETTING_LAST_EXTRACT        L"last_extract_path"
+#define SETTING_LAST_EXPORT         L"last_export_path"
 #define LANGUAGE_TAG                L"LANG_ID_"
 
 namespace kukdh1 {

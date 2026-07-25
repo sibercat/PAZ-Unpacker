@@ -19,6 +19,9 @@ A Windows GUI tool for unpacking and extracting files from **Black Desert Online
 - **Search window** — fast non-blocking search across all 800k+ files with live filtering
 - **Check for Updates** — checks GitHub releases for new versions
 - **File preview** — inline DDS/PNG/BMP texture preview panel
+- **3D model viewer** — textured preview of `.pam` models with orbit / pan / zoom
+- **Model export** — export any `.pam` to **OBJ** or **FBX**, with textures written alongside as PNG
+- **Resizable layout** — drag the splitter between the file tree and the preview
 - **Cache** — binary cache (v2) for fast startup; embeds folder path for multi-installation support
 - Multi-language support (English, Japanese, Korean)
 - Displays file metadata: size, PAZ source, internal path
@@ -39,6 +42,22 @@ The original project was last updated in 2015. This fork modernises the codebase
 | **Thread safety** | Added `std::atomic<bool>` busy flag guarding all thread spawns |
 | **Assertions** | `assert()` precondition checks on all critical parsing functions |
 | **Code quality** | `nullptr` throughout, `const`-correct getters, range-based for loops |
+
+### 3D models (v2.4.0)
+
+The `.pam` model format used by BDO was reverse engineered for this fork — see
+`PamModel.h` for the full layout. All three format versions found in the archive
+are supported.
+
+| Area | Detail |
+|---|---|
+| **Viewer** | Software rasteriser drawing into the existing preview panel — no GPU dependency, no external libraries |
+| **Shading** | Perspective-correct textured rendering with bilinear filtering and alpha cut-out for foliage and decals |
+| **Controls** | Drag to orbit, right-drag to pan, wheel to zoom, double-click to reset, middle-click cycles textured / solid / wireframe |
+| **Export** | Wavefront OBJ (+ `.mtl`) or binary FBX 7.4; pick the format in the save dialog |
+| **Textures** | Referenced textures are pulled from the archive and written next to the model as full-resolution PNG |
+
+Exports are verified to import into **Blender**, **3ds Max** and **Unreal Engine 5**.
 
 ## Requirements
 
