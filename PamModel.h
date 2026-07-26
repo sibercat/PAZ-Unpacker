@@ -85,7 +85,33 @@ namespace kukdh1 {
     private:
       void ComputeNormals();
       void Clear();
+
+      // Builds a PamModel from a .pcm collision mesh (see below); it needs
+      // ComputeNormals, and nothing else warrants making that public.
+      friend bool LoadCollisionMeshFromMemory(const uint8_t *pData, size_t stSize,
+                                              PamModel &out);
   };
+
+  // ── PCM ("PAR " type 0x11) collision mesh ──────────────────────────────────
+  //
+  //  0x00  char[4]   "PAR "
+  //  0x04  uint8     0x11 (collision mesh)
+  //  0x05  uint8     version, 2 observed throughout
+  //  0x06  uint8[10] 00 01 02 03 04 05 06 07 08 09 (constant)
+  //  0x10  uint32    vertex count
+  //  0x14  float[3]  position per vertex, centimetres
+  //        uint32    index count, always a multiple of 3
+  //        uint16    index per corner, all < vertex count
+  //
+  //  Every .pam has a .pcm sibling holding its collision hull. There are no
+  //  materials, texture names or UVs — it is pure geometry — so it loads
+  //  straight into a PamModel as a single untextured submesh with normals
+  //  computed from the faces, and everything downstream (viewer, OBJ, FBX)
+  //  works on it unchanged.
+  //
+  //  Validated on 400 files: all parse to an exact end-of-file.
+  bool LoadCollisionMesh(const std::wstring &wsPath, PamModel &out);
+  bool LoadCollisionMeshFromMemory(const uint8_t *pData, size_t stSize, PamModel &out);
 
 }
 

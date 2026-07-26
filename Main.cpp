@@ -1030,7 +1030,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
 
             // Export is offered on .pam models, .pac character meshes and
             // .pab skeletons only.
-            bool isPam = false, isPab = false, isPac = false, isPaa = false;
+            bool isPam = false, isPab = false, isPac = false, isPaa = false, isPcm = false;
             if (pNode->GetType() == kukdh1::Tree::TREE_TYPE_FILE) {
               const std::string &fp = pNode->GetFileInfo().sFullPath;
               if (fp.size() >= 4) {
@@ -1041,6 +1041,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
                 isPab = (e == ".pab");
                 isPac = (e == ".pac");
                 isPaa = (e == ".paa");
+                isPcm = (e == ".pcm");
               }
             }
 
@@ -1058,6 +1059,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
             else if (isPaa)
               AppendMenuW(hMenu, MF_STRING | (app.bBusy ? MF_GRAYED : 0), 2,
                           L"Export Animation + Skeleton (FBX)...");
+            else if (isPcm)
+              AppendMenuW(hMenu, MF_STRING | (app.bBusy ? MF_GRAYED : 0), 2,
+                          L"Export Collision Mesh (OBJ / FBX)...");
 
             int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, nullptr);
             DestroyMenu(hMenu);
@@ -2667,8 +2671,14 @@ DWORD WINAPI ExportThread(LPVOID arg) {
     }
   }
   else {
+    // A .pcm collision hull is plain geometry, so it loads into the same
+    // PamModel the rest of this path already handles; it just has no textures.
+    const bool isCollisionMesh = lowerPath.size() >= 4 &&
+      lowerPath.compare(lowerPath.size() - 4, 4, ".pcm") == 0;
+
     kukdh1::PamModel model;
-    bool loaded = model.Load(tempPath);
+    bool loaded = isCollisionMesh ? kukdh1::LoadCollisionMesh(tempPath, model)
+                                  : model.Load(tempPath);
     DeleteFile(tempPath.c_str());
 
     if (!loaded || model.IsEmpty()) {
@@ -2727,13 +2737,15 @@ void ExportSelectedModel(HWND hWnd, kukdh1::Tree *pTree) {
   std::transform(ext.begin(), ext.end(), ext.begin(),
                  [](unsigned char c) { return (char)::tolower(c); });
 
-  const bool isSkeleton = (ext == ".pab");
-  const bool isSkinned  = (ext == ".pac");
-  const bool isAnim     = (ext == ".paa");
-  if (ext != ".pam" && !isSkeleton && !isSkinned && !isAnim) {
+  const bool isSkeleton  = (ext == ".pab");
+  const bool isSkinned   = (ext == ".pac");
+  const bool isAnim      = (ext == ".paa");
+  const bool isCollision = (ext == ".pcm");
+  if (ext != ".pam" && !isSkeleton && !isSkinned && !isAnim && !isCollision) {
     MessageBoxW(hWnd,
-      L"Only .pam models, .pac character meshes, .pab skeletons and .paa "
-      L"animations can be exported.\r\n\r\nSelect one in the tree and try again.",
+      L"Only .pam models, .pac character meshes, .pcm collision meshes, .pab "
+      L"skeletons and .paa animations can be exported.\r\n\r\n"
+      L"Select one in the tree and try again.",
       L"Export Model", MB_OK | MB_ICONINFORMATION);
     return;
   }
@@ -2758,10 +2770,11 @@ void ExportSelectedModel(HWND hWnd, kukdh1::Tree *pTree) {
   std::wstring startDir;
   app.CSetting.getData(SETTING_LAST_EXPORT, startDir, L"");
 
-  const wchar_t *title = isSkeleton ? L"Export Skeleton"
-                       : isSkinned  ? L"Export Character Mesh"
-                       : isAnim     ? L"Export Animation"
-                                    : L"Export Model";
+  const wchar_t *title = isSkeleton  ? L"Export Skeleton"
+                       : isSkinned   ? L"Export Character Mesh"
+                       : isAnim      ? L"Export Animation"
+                       : isCollision ? L"Export Collision Mesh"
+                                     : L"Export Model";
 
   UINT filterIndex = 1;
   std::wstring outPath;
@@ -3322,8 +3335,9 @@ void UpdatePreview(kukdh1::Tree *pTree) {
   // ── 3D model preview ──────────────────────────────────────────────────────
   // .pac character meshes are flattened into the same static shape the
   // rasteriser already draws; the skin is irrelevant for a bind-pose preview.
-  if (ext == ".pam" || ext == ".pac") {
+  if (ext == ".pam" || ext == ".pac" || ext == ".pcm") {
     const bool bCharacter = (ext == ".pac");
+    const bool bCollision = (ext == ".pcm");
     if (info.uiOriginalSize > (uint32_t)MODEL_SIZE_LIMIT) {
       SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Model too large to preview");
       return;
@@ -3350,6 +3364,8 @@ void UpdatePreview(kukdh1::Tree *pTree) {
     if (bCharacter) {
       kukdh1::PacModel pac;
       loaded = pac.Load(mTempPath) && kukdh1::PacToPamModel(pac, *model);
+    } else if (bCollision) {
+      loaded = kukdh1::LoadCollisionMesh(mTempPath, *model);
     } else {
       loaded = model->Load(mTempPath);
     }

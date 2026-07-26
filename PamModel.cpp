@@ -1,5 +1,6 @@
 #include "PamModel.h"
 
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -245,6 +246,81 @@ namespace kukdh1 {
     float dz = fBBoxMax[2] - fBBoxMin[2];
     float r  = 0.5f * std::sqrt(dx * dx + dy * dy + dz * dz);
     return (r > 1e-6f) ? r : 1.0f;
+  }
+
+  // ── Collision mesh (.pcm) ──────────────────────────────────────────────────
+
+  bool LoadCollisionMeshFromMemory(const uint8_t *pData, size_t stSize, PamModel &out) {
+    assert(pData != nullptr);
+    out = PamModel();
+
+    constexpr uint8_t TYPE_COLLISION = 0x11;
+    if (stSize < 0x18)                        return false;
+    if (memcmp(pData, "PAR ", 4) != 0)        return false;
+    if (pData[4] != TYPE_COLLISION)           return false;
+
+    out.uiVersion = pData[5];
+
+    uint32_t vcount = 0;
+    memcpy(&vcount, pData + 0x10, 4);
+    if (vcount == 0) return false;
+
+    const size_t vend = 0x14 + (size_t)vcount * 12;
+    if (vend + 4 > stSize) { out = PamModel(); return false; }
+
+    uint32_t icount = 0;
+    memcpy(&icount, pData + vend, 4);
+    // A count that is not whole triangles means this is not the layout we
+    // think it is, so reject rather than read garbage.
+    if (icount == 0 || icount % 3 != 0)                { out = PamModel(); return false; }
+    if (vend + 4 + (size_t)icount * 2 != stSize)       { out = PamModel(); return false; }
+
+    out.vVertices.resize(vcount);
+    float lo[3] = {  1e30f,  1e30f,  1e30f };
+    float hi[3] = { -1e30f, -1e30f, -1e30f };
+    for (uint32_t i = 0; i < vcount; i++) {
+      float p[3];
+      memcpy(p, pData + 0x14 + (size_t)i * 12, 12);
+      PamVertex &v = out.vVertices[i];
+      v.x = p[0]; v.y = p[1]; v.z = p[2];
+      v.u = v.v = 0.0f;                 // collision hulls carry no UVs
+      for (int k = 0; k < 3; k++) {
+        if (p[k] < lo[k]) lo[k] = p[k];
+        if (p[k] > hi[k]) hi[k] = p[k];
+      }
+    }
+
+    out.vIndices.reserve(icount);
+    for (uint32_t i = 0; i < icount; i++) {
+      uint16_t idx = 0;
+      memcpy(&idx, pData + vend + 4 + (size_t)i * 2, 2);
+      if (idx >= vcount) { out = PamModel(); return false; }
+      out.vIndices.push_back(idx);
+    }
+
+    PamSubmesh sm;
+    sm.uiBaseVertex  = 0;
+    sm.uiVertexCount = vcount;
+    sm.uiBaseIndex   = 0;
+    sm.uiIndexCount  = icount;
+    out.vSubmeshes.push_back(std::move(sm));   // no texture: none exists
+
+    for (int k = 0; k < 3; k++) { out.fBBoxMin[k] = lo[k]; out.fBBoxMax[k] = hi[k]; }
+    out.uiVertexStride = 12;
+    out.ComputeNormals();
+    return true;
+  }
+
+  bool LoadCollisionMesh(const std::wstring &wsPath, PamModel &out) {
+    std::ifstream f(wsPath, std::ios::binary | std::ios::ate);
+    if (!f) return false;
+    std::streamoff len = f.tellg();
+    if (len <= 0) return false;
+    f.seekg(0);
+    std::vector<uint8_t> buf((size_t)len);
+    f.read(reinterpret_cast<char *>(buf.data()), len);
+    if (!f) return false;
+    return LoadCollisionMeshFromMemory(buf.data(), buf.size(), out);
   }
 
 }
