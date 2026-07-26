@@ -226,79 +226,72 @@ namespace kukdh1 {
       }
     };
 
-    bool WriteFbx(const PamModel &model, const std::wstring &wsPath,
-                  const PamTextureFileList &vTextureFiles, std::wstring &wsError) {
-      std::ofstream f(wsPath, std::ios::binary);
-      if (!f) { wsError = L"Could not open the .fbx file for writing."; return false; }
+    // ── Shared FBX emit ──────────────────────────────────────────────────
+    // Writes the magic, the node tree and the footer. The footer id is a
+    // checksum partner of FileId and CreationTime in BuildFbxPreamble, so
+    // both functions must be used together or the Autodesk SDK rejects the
+    // file with "Cannot open FBX file".
+    void EmitFbxFile(std::ofstream &f, const std::vector<FbxNode> &roots) {
 
-      const std::string stem = StemOf(wsPath);
-      const size_t vcount = model.vVertices.size();
-      const size_t tcount = model.vIndices.size() / 3;
+      // ── Emit ─────────────────────────────────────────────────────────────
+      const char magic[23] = {
+        'K','a','y','d','a','r','a',' ','F','B','X',' ','B','i','n','a','r','y',
+        ' ',' ', '\0', '\x1A', '\0'
+      };
+      f.write(magic, 23);
+      uint32_t version = 7400;
+      f.write(reinterpret_cast<const char *>(&version), 4);
 
-      // Unique object ids. Any distinct 64-bit values will do.
+      size_t offset = 27;
+      for (const auto &r : roots) {
+        r.Write(f, offset);
+        offset += r.Size();
+      }
+
+      // Null record closes the top-level list.
+      char nullRec[13] = {};
+      f.write(nullRec, 13);
+      offset += 13;
+
+      // ── Footer ───────────────────────────────────────────────────────────
+      // Exact layout, verified byte-for-byte against a file the Autodesk SDK
+      // accepts:
+      //   16 bytes footer id, zero padding up to a 16-byte boundary,
+      //   uint32 version, 120 zero bytes, 16-byte magic.
+      // There is NO extra padding word before the version — adding one shifts
+      // the whole footer and the SDK reports "Cannot open FBX file".
+      //
+      // The footer id is not arbitrary: it is derived from FileId, so the two
+      // constants below are a matched pair and must be changed together.
+      static const unsigned char kFooterId[16] = {
+        0xFA, 0xBC, 0xAB, 0x09, 0xD0, 0xC8, 0xD4, 0x66,
+        0xB1, 0x76, 0xFB, 0x83, 0x1C, 0xF7, 0x26, 0x7E
+      };
+      f.write(reinterpret_cast<const char *>(kFooterId), 16);
+      offset += 16;
+
+      char zero[16] = {};
+      size_t pad = (16 - (offset % 16)) % 16;
+      if (pad) { f.write(zero, pad); offset += pad; }
+
+      f.write(reinterpret_cast<const char *>(&version), 4);
+      for (int i = 0; i < 120; i++) f.put('\0');
+
+      static const unsigned char kFooterMagic[16] = {
+        0xF8, 0x5A, 0x8C, 0x6A, 0xDE, 0xF5, 0xD9, 0x7E,
+        0xEC, 0xE9, 0x0C, 0xE3, 0x75, 0x8F, 0x29, 0x0B
+      };
+      f.write(reinterpret_cast<const char *>(kFooterMagic), 16);
+    }
+
+    // ── Shared FBX preamble ──────────────────────────────────────────────
+    // Every section here is required by the Autodesk FBX SDK (3ds Max and
+    // Unreal both use it); Blender is happy with far less. Kept in one place
+    // so the mesh and skeleton exports cannot drift apart -- in particular
+    // the FileId / CreationTime / footer-id checksum triple, which only
+    // validates as a matched set.
+    void BuildFbxPreamble(std::vector<FbxNode> &roots) {
       const int64_t idDocument = 100000;
-      const int64_t idGeometry = 1000000;
-      const int64_t idModel    = 2000000;
-      const int64_t idMatBase  = 3000000;
-      const int64_t idTexBase  = 4000000;
-      const int64_t idVidBase  = 5000000;
-
-      // Which submeshes have a texture file to hook up.
-      std::vector<size_t> texSlots;
-      for (size_t s = 0; s < model.vSubmeshes.size(); s++)
-        if (s < vTextureFiles.size() && !vTextureFiles[s].empty())
-          texSlots.push_back(s);
-
-      // ── Geometry arrays ──────────────────────────────────────────────────
-      std::vector<double> verts;
-      verts.reserve(vcount * 3);
-      for (const auto &v : model.vVertices) {
-        verts.push_back(v.x); verts.push_back(v.y); verts.push_back(v.z);
-      }
-
-      std::vector<double> normals;
-      normals.reserve(vcount * 3);
-      for (const auto &v : model.vVertices) {
-        normals.push_back(v.nx); normals.push_back(v.ny); normals.push_back(v.nz);
-      }
-
-      std::vector<double> uvs;
-      uvs.reserve(vcount * 2);
-      for (const auto &v : model.vVertices) {
-        uvs.push_back(v.u);
-        uvs.push_back(1.0 - v.v);      // FBX UV origin is bottom-left
-      }
-
-      // Polygon vertex indices: the final index of each polygon is stored as
-      // its bitwise complement to mark the end of the face.
-      std::vector<int32_t> polyIdx;
-      std::vector<int32_t> uvIdx;
-      polyIdx.reserve(model.vIndices.size());
-      uvIdx.reserve(model.vIndices.size());
-      for (size_t i = 0; i + 2 < model.vIndices.size(); i += 3) {
-        const int32_t a = (int32_t)model.vIndices[i + 0];
-        const int32_t b = (int32_t)model.vIndices[i + 1];
-        const int32_t c = (int32_t)model.vIndices[i + 2];
-        polyIdx.push_back(a); polyIdx.push_back(b); polyIdx.push_back(~c);
-        uvIdx.push_back(a);   uvIdx.push_back(b);   uvIdx.push_back(c);
-      }
-
-      // One material index per triangle.
-      std::vector<int32_t> matPerPoly;
-      matPerPoly.reserve(tcount);
-      for (size_t s = 0; s < model.vSubmeshes.size(); s++) {
-        const uint32_t tris = model.vSubmeshes[s].uiIndexCount / 3;
-        for (uint32_t t = 0; t < tris; t++) matPerPoly.push_back((int32_t)s);
-      }
-
-      // ── Document tree ────────────────────────────────────────────────────
-      std::vector<FbxNode> roots;
-
-      // Blender's importer is happy with a bare minimum, but the Autodesk FBX
-      // SDK — which 3ds Max and Unreal both use — additionally requires the
-      // header timestamp, SceneInfo, FileId, Documents, References and Takes
-      // sections. Omitting Documents in particular leaves the SDK with no
-      // scene to populate and the import silently yields nothing.
       const char *kCreator = "PAZ Unpacker FBX Export";
 
       // Part of the FileId / footer-id / CreationTime checksum triple below.
@@ -420,6 +413,77 @@ namespace kukdh1 {
         roots.push_back(std::move(doc));
       }
       { roots.push_back(FbxNode("References")); }
+    }
+
+    bool WriteFbx(const PamModel &model, const std::wstring &wsPath,
+                  const PamTextureFileList &vTextureFiles, std::wstring &wsError) {
+      std::ofstream f(wsPath, std::ios::binary);
+      if (!f) { wsError = L"Could not open the .fbx file for writing."; return false; }
+
+      const std::string stem = StemOf(wsPath);
+      const size_t vcount = model.vVertices.size();
+      const size_t tcount = model.vIndices.size() / 3;
+
+      // Unique object ids. Any distinct 64-bit values will do.
+      const int64_t idDocument = 100000;
+      const int64_t idGeometry = 1000000;
+      const int64_t idModel    = 2000000;
+      const int64_t idMatBase  = 3000000;
+      const int64_t idTexBase  = 4000000;
+      const int64_t idVidBase  = 5000000;
+
+      // Which submeshes have a texture file to hook up.
+      std::vector<size_t> texSlots;
+      for (size_t s = 0; s < model.vSubmeshes.size(); s++)
+        if (s < vTextureFiles.size() && !vTextureFiles[s].empty())
+          texSlots.push_back(s);
+
+      // ── Geometry arrays ──────────────────────────────────────────────────
+      std::vector<double> verts;
+      verts.reserve(vcount * 3);
+      for (const auto &v : model.vVertices) {
+        verts.push_back(v.x); verts.push_back(v.y); verts.push_back(v.z);
+      }
+
+      std::vector<double> normals;
+      normals.reserve(vcount * 3);
+      for (const auto &v : model.vVertices) {
+        normals.push_back(v.nx); normals.push_back(v.ny); normals.push_back(v.nz);
+      }
+
+      std::vector<double> uvs;
+      uvs.reserve(vcount * 2);
+      for (const auto &v : model.vVertices) {
+        uvs.push_back(v.u);
+        uvs.push_back(1.0 - v.v);      // FBX UV origin is bottom-left
+      }
+
+      // Polygon vertex indices: the final index of each polygon is stored as
+      // its bitwise complement to mark the end of the face.
+      std::vector<int32_t> polyIdx;
+      std::vector<int32_t> uvIdx;
+      polyIdx.reserve(model.vIndices.size());
+      uvIdx.reserve(model.vIndices.size());
+      for (size_t i = 0; i + 2 < model.vIndices.size(); i += 3) {
+        const int32_t a = (int32_t)model.vIndices[i + 0];
+        const int32_t b = (int32_t)model.vIndices[i + 1];
+        const int32_t c = (int32_t)model.vIndices[i + 2];
+        polyIdx.push_back(a); polyIdx.push_back(b); polyIdx.push_back(~c);
+        uvIdx.push_back(a);   uvIdx.push_back(b);   uvIdx.push_back(c);
+      }
+
+      // One material index per triangle.
+      std::vector<int32_t> matPerPoly;
+      matPerPoly.reserve(tcount);
+      for (size_t s = 0; s < model.vSubmeshes.size(); s++) {
+        const uint32_t tris = model.vSubmeshes[s].uiIndexCount / 3;
+        for (uint32_t t = 0; t < tris; t++) matPerPoly.push_back((int32_t)s);
+      }
+
+      // ── Document tree ────────────────────────────────────────────────────
+      std::vector<FbxNode> roots;
+      BuildFbxPreamble(roots);
+
       {
         FbxNode defs("Definitions");
         defs.Child("Version").I32(100);
@@ -620,58 +684,146 @@ namespace kukdh1 {
         roots.push_back(std::move(takes));
       }
 
-      // ── Emit ─────────────────────────────────────────────────────────────
-      const char magic[23] = {
-        'K','a','y','d','a','r','a',' ','F','B','X',' ','B','i','n','a','r','y',
-        ' ',' ', '\0', '\x1A', '\0'
-      };
-      f.write(magic, 23);
-      uint32_t version = 7400;
-      f.write(reinterpret_cast<const char *>(&version), 4);
-
-      size_t offset = 27;
-      for (const auto &r : roots) {
-        r.Write(f, offset);
-        offset += r.Size();
-      }
-
-      // Null record closes the top-level list.
-      char nullRec[13] = {};
-      f.write(nullRec, 13);
-      offset += 13;
-
-      // ── Footer ───────────────────────────────────────────────────────────
-      // Exact layout, verified byte-for-byte against a file the Autodesk SDK
-      // accepts:
-      //   16 bytes footer id, zero padding up to a 16-byte boundary,
-      //   uint32 version, 120 zero bytes, 16-byte magic.
-      // There is NO extra padding word before the version — adding one shifts
-      // the whole footer and the SDK reports "Cannot open FBX file".
-      //
-      // The footer id is not arbitrary: it is derived from FileId, so the two
-      // constants below are a matched pair and must be changed together.
-      static const unsigned char kFooterId[16] = {
-        0xFA, 0xBC, 0xAB, 0x09, 0xD0, 0xC8, 0xD4, 0x66,
-        0xB1, 0x76, 0xFB, 0x83, 0x1C, 0xF7, 0x26, 0x7E
-      };
-      f.write(reinterpret_cast<const char *>(kFooterId), 16);
-      offset += 16;
-
-      char zero[16] = {};
-      size_t pad = (16 - (offset % 16)) % 16;
-      if (pad) { f.write(zero, pad); offset += pad; }
-
-      f.write(reinterpret_cast<const char *>(&version), 4);
-      for (int i = 0; i < 120; i++) f.put('\0');
-
-      static const unsigned char kFooterMagic[16] = {
-        0xF8, 0x5A, 0x8C, 0x6A, 0xDE, 0xF5, 0xD9, 0x7E,
-        0xEC, 0xE9, 0x0C, 0xE3, 0x75, 0x8F, 0x29, 0x0B
-      };
-      f.write(reinterpret_cast<const char *>(kFooterMagic), 16);
+      EmitFbxFile(f, roots);
 
       if (!f) { wsError = L"Failed while writing the .fbx file."; return false; }
       (void)vTextureFiles;   // textures are referenced by the sidecar files
+      return true;
+    }
+
+    // ── Skeleton export ──────────────────────────────────────────────────────
+
+    // FBX stores node rotation as Euler angles in degrees, applied in the order
+    // named by RotationOrder (0 = XYZ, the default we rely on). For that order
+    // the composed matrix is Rz*Ry*Rx, which gives the extraction below.
+    void QuatToEulerXYZDeg(const float q[4], double out[3]) {
+      double x = q[0], y = q[1], z = q[2], w = q[3];
+      const double n = std::sqrt(x*x + y*y + z*z + w*w);
+      if (n > 0.0) { x /= n; y /= n; z /= n; w /= n; }
+
+      const double m00 = 1 - 2*(y*y + z*z), m01 =     2*(x*y - z*w), m02 =     2*(x*z + y*w);
+      const double m10 =     2*(x*y + z*w), m11 = 1 - 2*(x*x + z*z), m12 =     2*(y*z - x*w);
+      const double m20 =     2*(x*z - y*w), m21 =     2*(y*z + x*w), m22 = 1 - 2*(x*x + y*y);
+      (void)m01; (void)m11;
+
+      double sy = -m20;
+      if (sy >  1.0) sy =  1.0;
+      if (sy < -1.0) sy = -1.0;
+
+      double rx, ry, rz;
+      if (std::fabs(sy) > 0.999999) {
+        // Gimbal lock: X and Z become degenerate, so fold everything into X.
+        ry = std::asin(sy);
+        rx = std::atan2(-m12, m11);
+        rz = 0.0;
+      } else {
+        ry = std::asin(sy);
+        rx = std::atan2(m21, m22);
+        rz = std::atan2(m10, m00);
+      }
+
+      const double kRadToDeg = 57.295779513082320876798154814105;
+      out[0] = rx * kRadToDeg;
+      out[1] = ry * kRadToDeg;
+      out[2] = rz * kRadToDeg;
+    }
+
+    bool WriteSkeletonFbx(const PabSkeleton &skel, const std::wstring &wsPath,
+                          std::wstring &wsError) {
+      std::ofstream f(wsPath, std::ios::binary);
+      if (!f) { wsError = L"Could not open the .fbx file for writing."; return false; }
+
+      const size_t bones = skel.vBones.size();
+
+      // Ids must not collide with the mesh export's ranges, so that a combined
+      // mesh + skeleton file can reuse both blocks unchanged later.
+      const int64_t idModelBase = 6000000;
+      const int64_t idAttrBase  = 7000000;
+
+      std::vector<FbxNode> roots;
+      BuildFbxPreamble(roots);
+
+      {
+        FbxNode defs("Definitions");
+        defs.Child("Version").I32(100);
+        defs.Child("Count").I32((int32_t)(1 + bones * 2));
+        { FbxNode &o = defs.Child("ObjectType"); o.Str("GlobalSettings"); o.Child("Count").I32(1); }
+        { FbxNode &o = defs.Child("ObjectType"); o.Str("Model");
+          o.Child("Count").I32((int32_t)bones); }
+        { FbxNode &o = defs.Child("ObjectType"); o.Str("NodeAttribute");
+          o.Child("Count").I32((int32_t)bones); }
+        roots.push_back(std::move(defs));
+      }
+
+      {
+        FbxNode objs("Objects");
+
+        for (size_t i = 0; i < bones; i++) {
+          const PabBone &b = skel.vBones[i];
+
+          // The attribute is what makes the node draw and behave as a bone
+          // rather than an empty transform.
+          FbxNode &attr = objs.Child("NodeAttribute");
+          attr.I64(idAttrBase + (int64_t)i);
+          attr.NameClass(b.sName, "NodeAttribute");
+          attr.Str("LimbNode");
+          {
+            FbxNode &p70 = attr.Child("Properties70");
+            FbxNode &p = p70.Child("P");
+            p.P("Size", "double", "Number", ""); p.F64(1.0);
+          }
+          attr.Child("TypeFlags").Str("Skeleton");
+
+          double euler[3];
+          QuatToEulerXYZDeg(b.fQuat, euler);
+
+          FbxNode &mdl = objs.Child("Model");
+          mdl.I64(idModelBase + (int64_t)i);
+          mdl.NameClass(b.sName, "Model");
+          mdl.Str("LimbNode");
+          mdl.Child("Version").I32(232);
+          {
+            FbxNode &p70 = mdl.Child("Properties70");
+            { FbxNode &p = p70.Child("P"); p.P("RotationActive", "bool", "", ""); p.I32(1); }
+            { FbxNode &p = p70.Child("P"); p.P("InheritType", "enum", "", ""); p.I32(1); }
+            { FbxNode &p = p70.Child("P"); p.P("Lcl Translation", "Lcl Translation", "", "A");
+              p.F64(b.fTrans[0]); p.F64(b.fTrans[1]); p.F64(b.fTrans[2]); }
+            { FbxNode &p = p70.Child("P"); p.P("Lcl Rotation", "Lcl Rotation", "", "A");
+              p.F64(euler[0]); p.F64(euler[1]); p.F64(euler[2]); }
+            { FbxNode &p = p70.Child("P"); p.P("Lcl Scaling", "Lcl Scaling", "", "A");
+              p.F64(b.fScale[0]); p.F64(b.fScale[1]); p.F64(b.fScale[2]); }
+          }
+          mdl.Child("Shading").Bool(true);
+          mdl.Child("Culling").Str("CullingOff");
+        }
+
+        roots.push_back(std::move(objs));
+      }
+
+      {
+        FbxNode conn("Connections");
+        for (size_t i = 0; i < bones; i++) {
+          // Attribute -> its own model.
+          { FbxNode &c = conn.Child("C"); c.Str("OO");
+            c.I64(idAttrBase + (int64_t)i); c.I64(idModelBase + (int64_t)i); }
+          // Model -> parent model, or the scene root for the skeleton root.
+          const int32_t par = skel.vBones[i].iParent;
+          { FbxNode &c = conn.Child("C"); c.Str("OO");
+            c.I64(idModelBase + (int64_t)i);
+            c.I64(par < 0 ? 0 : idModelBase + (int64_t)par); }
+        }
+        roots.push_back(std::move(conn));
+      }
+
+      {
+        FbxNode takes("Takes");
+        takes.Child("Current").Str("");
+        roots.push_back(std::move(takes));
+      }
+
+      EmitFbxFile(f, roots);
+
+      if (!f) { wsError = L"Failed while writing the .fbx file."; return false; }
       return true;
     }
 
@@ -702,6 +854,17 @@ namespace kukdh1 {
     }
     wsError = L"Unknown export format.";
     return false;
+  }
+
+  bool ExportSkeleton(const PabSkeleton &skel, const std::wstring &wsPath,
+                      std::wstring &wsError) {
+    wsError.clear();
+    if (skel.IsEmpty()) {
+      wsError = L"The skeleton has no bones to export.";
+      return false;
+    }
+    // OBJ has no concept of a node hierarchy, so FBX is the only option here.
+    return WriteSkeletonFbx(skel, wsPath, wsError);
   }
 
 }

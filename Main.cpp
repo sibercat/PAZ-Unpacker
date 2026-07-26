@@ -562,7 +562,7 @@ BOOL Cls_OnCreate(HWND hWnd, LPCREATESTRUCT lpCreateStruct) {
     HMENU hFile  = CreatePopupMenu();
     AppendMenuW(hFile, MF_STRING,    ID_MENU_FILE_OPEN,    L"&Open Folder...");
     AppendMenuW(hFile, MF_STRING,    ID_MENU_FILE_EXTRACT, L"&Extract...");
-    AppendMenuW(hFile, MF_STRING,    ID_MENU_FILE_EXPORT,  L"Export &Model (OBJ / FBX)...");
+    AppendMenuW(hFile, MF_STRING,    ID_MENU_FILE_EXPORT,  L"Export &Model / Skeleton...");
     AppendMenuW(hFile, MF_SEPARATOR, 0,                    nullptr);
     AppendMenuW(hFile, MF_STRING,    ID_MENU_FILE_EXIT,    L"E&xit");
 
@@ -1028,8 +1028,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
           if (tvi.lParam) {
             kukdh1::Tree *pNode = (kukdh1::Tree *)tvi.lParam;
 
-            // Offer the model export only on .pam files.
-            bool isPam = false;
+            // Export is offered on .pam models and .pab skeletons only.
+            bool isPam = false, isPab = false;
             if (pNode->GetType() == kukdh1::Tree::TREE_TYPE_FILE) {
               const std::string &fp = pNode->GetFileInfo().sFullPath;
               if (fp.size() >= 4) {
@@ -1037,6 +1037,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
                 std::transform(e.begin(), e.end(), e.begin(),
                                [](unsigned char c) { return (char)::tolower(c); });
                 isPam = (e == ".pam");
+                isPab = (e == ".pab");
               }
             }
 
@@ -1045,6 +1046,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
             if (isPam)
               AppendMenuW(hMenu, MF_STRING | (app.bBusy ? MF_GRAYED : 0), 2,
                           L"Export Model (OBJ / FBX)...");
+            else if (isPab)
+              AppendMenuW(hMenu, MF_STRING | (app.bBusy ? MF_GRAYED : 0), 2,
+                          L"Export Skeleton (FBX)...");
 
             int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, nullptr);
             DestroyMenu(hMenu);
@@ -2415,9 +2419,44 @@ DWORD WINAPI ExportThread(LPVOID arg) {
   GetTempPath(MAX_PATH, tempDir);
   std::wstring tempPath = std::wstring(tempDir) + L"paz_export_" + wName;
 
+  std::string lowerPath = info.sFullPath;
+  std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(),
+                 [](unsigned char c) { return (char)::tolower(c); });
+  const bool isSkeleton = lowerPath.size() >= 4 &&
+                          lowerPath.compare(lowerPath.size() - 4, 4, ".pab") == 0;
+
   kukdh1::CryptICE cipher(ICE_KEY, ICE_KEY_LEN);
   if (!ExtractFile(tempPath, info, cipher)) {
     msg = L"Could not extract the model from the archive.";
+  }
+  else if (isSkeleton) {
+    SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Writing skeleton...");
+    kukdh1::PabSkeleton skel;
+    bool loaded = skel.Load(tempPath);
+    DeleteFile(tempPath.c_str());
+
+    if (!loaded || skel.IsEmpty()) {
+      msg = L"The skeleton could not be parsed.";
+    }
+    else {
+      std::wstring err;
+      if (kukdh1::ExportSkeleton(skel, p->wsPath, err)) {
+        ok = true;
+        WCHAR buf[256];
+        int depth = 0;
+        std::vector<int> d(skel.vBones.size(), 0);
+        for (size_t i = 0; i < skel.vBones.size(); i++) {
+          const int32_t par = skel.vBones[i].iParent;
+          d[i] = (par < 0) ? 0 : d[par] + 1;
+          if (d[i] > depth) depth = d[i];
+        }
+        swprintf_s(buf, L"Exported skeleton: %zu bones, depth %d.",
+                   skel.vBones.size(), depth);
+        msg = buf;
+      } else {
+        msg = err;
+      }
+    }
   }
   else {
     kukdh1::PamModel model;
@@ -2479,23 +2518,29 @@ void ExportSelectedModel(HWND hWnd, kukdh1::Tree *pTree) {
   std::string ext = (full.size() >= 4) ? full.substr(full.size() - 4) : "";
   std::transform(ext.begin(), ext.end(), ext.begin(),
                  [](unsigned char c) { return (char)::tolower(c); });
-  if (ext != ".pam") {
+
+  const bool isSkeleton = (ext == ".pab");
+  if (ext != ".pam" && !isSkeleton) {
     MessageBoxW(hWnd,
-      L"Only .pam model files can be exported.\r\n\r\n"
-      L"Select a .pam file in the tree and try again.",
+      L"Only .pam models and .pab skeletons can be exported.\r\n\r\n"
+      L"Select one in the tree and try again.",
       L"Export Model", MB_OK | MB_ICONINFORMATION);
     return;
   }
 
-  // Suggest the model's own name, minus the .pam extension.
+  // Suggest the file's own name, minus its extension.
   size_t slash = full.rfind('/');
   std::string base = (slash != std::string::npos) ? full.substr(slash + 1) : full;
   if (base.size() > 4) base = base.substr(0, base.size() - 4);
   std::wstring wBase;
   kukdh1::ConvertWidechar(base, wBase);
 
-  const COMDLG_FILTERSPEC filters[] = {
+  // OBJ cannot represent a bone hierarchy, so a skeleton offers FBX only.
+  const COMDLG_FILTERSPEC meshFilters[] = {
     { L"Wavefront OBJ (*.obj)",  L"*.obj" },
+    { L"Autodesk FBX (*.fbx)",   L"*.fbx" },
+  };
+  const COMDLG_FILTERSPEC skelFilters[] = {
     { L"Autodesk FBX (*.fbx)",   L"*.fbx" },
   };
 
@@ -2504,13 +2549,17 @@ void ExportSelectedModel(HWND hWnd, kukdh1::Tree *pTree) {
 
   UINT filterIndex = 1;
   std::wstring outPath;
-  if (!kukdh1::SaveFileDialog(hWnd, L"Export Model", (wBase + L".obj").c_str(),
-                              filters, ARRAYSIZE(filters), startDir.c_str(),
-                              filterIndex, outPath))
+  if (!kukdh1::SaveFileDialog(hWnd,
+                              isSkeleton ? L"Export Skeleton" : L"Export Model",
+                              (wBase + (isSkeleton ? L".fbx" : L".obj")).c_str(),
+                              isSkeleton ? skelFilters : meshFilters,
+                              isSkeleton ? ARRAYSIZE(skelFilters) : ARRAYSIZE(meshFilters),
+                              startDir.c_str(), filterIndex, outPath))
     return;
 
-  kukdh1::PamExportFormat fmt = (filterIndex == 2) ? kukdh1::PAM_EXPORT_FBX
-                                                   : kukdh1::PAM_EXPORT_OBJ;
+  kukdh1::PamExportFormat fmt = (isSkeleton || filterIndex == 2)
+                                  ? kukdh1::PAM_EXPORT_FBX
+                                  : kukdh1::PAM_EXPORT_OBJ;
 
   // The dialog does not always append the extension when the name already
   // contains a dot, so make sure it matches the chosen type.

@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "PabSkeleton.h"
 #include "PamModel.h"
 
 namespace kukdh1 {
@@ -29,6 +30,12 @@ namespace kukdh1 {
 
   // Default file extension for a format, without the dot.
   const wchar_t *ExportExtension(PamExportFormat format);
+
+  // Writes a .pab skeleton as a binary FBX bone hierarchy (LimbNode chain with
+  // local translation / rotation / scale). FBX only — OBJ cannot represent a
+  // node hierarchy. Returns false on any I/O failure.
+  bool ExportSkeleton(const PabSkeleton &skel, const std::wstring &wsPath,
+                      std::wstring &wsError);
 
 }
 
