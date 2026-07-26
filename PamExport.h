@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "PabSkeleton.h"
+#include "PacModel.h"
 #include "PamModel.h"
 
 namespace kukdh1 {
@@ -36,6 +37,13 @@ namespace kukdh1 {
   // node hierarchy. Returns false on any I/O failure.
   bool ExportSkeleton(const PabSkeleton &skel, const std::wstring &wsPath,
                       std::wstring &wsError);
+
+  // Writes a .pac character mesh bound to its .pab skeleton: geometry plus a
+  // bone hierarchy, skin clusters and a bind pose. The mesh's bone palette is
+  // resolved against the skeleton by bone id, so the two files must belong
+  // together; wsError explains it if they do not. FBX only.
+  bool ExportSkinnedModel(const PacModel &model, const PabSkeleton &skel,
+                          const std::wstring &wsPath, std::wstring &wsError);
 
 }
 

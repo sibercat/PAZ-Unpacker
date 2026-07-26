@@ -58,6 +58,17 @@ namespace kukdh1 {
     float       fScale[3];
     float       fQuat[4];    // x, y, z, w
     float       fTrans[3];
+
+    // Stable per-bone id. A .pac mesh does not store global bone indices --
+    // its per-file palette lists these ids, and a vertex's 4 bone indices are
+    // offsets into that palette. Resolving a skin therefore means matching
+    // palette entries against this field.
+    //
+    // Sits at payload+302, so its last two bytes fall in what would otherwise
+    // be the inter-record gap. The final bone in a file is stored two bytes
+    // short, so its id is unavailable; bHasId says whether it was read.
+    uint32_t    uiBoneId;
+    bool        bHasId;
   };
 
   class PabSkeleton {
@@ -79,6 +90,15 @@ namespace kukdh1 {
       // Composes the local SRT chain into a world-space position per bone.
       // Sized to vBones; safe to call on an empty skeleton.
       void ComputeWorldPositions(std::vector<float> &vOutXYZ) const;
+
+      // World transform per bone as 16 floats, laid out the way FBX stores a
+      // matrix: rows of basis vectors with the translation at 12, 13, 14.
+      // This is what a skin cluster's TransformLink needs.
+      void ComputeWorldMatrices(std::vector<float> &vOut16) const;
+
+      // Index of the bone carrying uiBoneId, or -1. Used to resolve a .pac
+      // bone palette onto this skeleton.
+      int FindBoneById(uint32_t uiId) const;
 
     private:
       void Clear();

@@ -1028,8 +1028,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
           if (tvi.lParam) {
             kukdh1::Tree *pNode = (kukdh1::Tree *)tvi.lParam;
 
-            // Export is offered on .pam models and .pab skeletons only.
-            bool isPam = false, isPab = false;
+            // Export is offered on .pam models, .pac character meshes and
+            // .pab skeletons only.
+            bool isPam = false, isPab = false, isPac = false;
             if (pNode->GetType() == kukdh1::Tree::TREE_TYPE_FILE) {
               const std::string &fp = pNode->GetFileInfo().sFullPath;
               if (fp.size() >= 4) {
@@ -1038,6 +1039,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
                                [](unsigned char c) { return (char)::tolower(c); });
                 isPam = (e == ".pam");
                 isPab = (e == ".pab");
+                isPac = (e == ".pac");
               }
             }
 
@@ -1049,6 +1051,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
             else if (isPab)
               AppendMenuW(hMenu, MF_STRING | (app.bBusy ? MF_GRAYED : 0), 2,
                           L"Export Skeleton (FBX)...");
+            else if (isPac)
+              AppendMenuW(hMenu, MF_STRING | (app.bBusy ? MF_GRAYED : 0), 2,
+                          L"Export Character Mesh + Skeleton (FBX)...");
 
             int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, nullptr);
             DestroyMenu(hMenu);
@@ -2395,6 +2400,37 @@ struct ExportParams {
   kukdh1::PamExportFormat format;
 };
 
+// A .pac names no skeleton, but the archive lays them out by convention:
+//   character/model/1_pc/11_pgw/armor/9_upperbody/pgw_00_ub_0001.pac
+//   character/model/1_pc/11_pgw/pgw_01.pab
+// so the rig is the .pab whose name starts with the mesh's prefix -- the text
+// up to the first underscore. Prefer <prefix>_01.pab, which is the base rig.
+static kukdh1::Tree *FindSkeletonFor(const std::string &sPacPath) {
+  size_t slash = sPacPath.rfind('/');
+  std::string base = (slash != std::string::npos) ? sPacPath.substr(slash + 1) : sPacPath;
+  size_t us = base.find('_');
+  if (us == std::string::npos || us == 0) return nullptr;
+
+  std::string prefix = base.substr(0, us);
+  std::transform(prefix.begin(), prefix.end(), prefix.begin(),
+                 [](unsigned char c) { return (char)::tolower(c); });
+
+  kukdh1::Tree *best = nullptr;
+  for (kukdh1::Tree *n : GetCachedFileNodes()) {
+    const std::string &p = n->GetFileInfo().sFullPath;
+    if (p.size() < 5 || p.compare(p.size() - 4, 4, ".pab") != 0) continue;
+    size_t s = p.rfind('/');
+    std::string b = (s != std::string::npos) ? p.substr(s + 1) : p;
+    std::transform(b.begin(), b.end(), b.begin(),
+                   [](unsigned char c) { return (char)::tolower(c); });
+    if (b.compare(0, prefix.size(), prefix) != 0) continue;
+    if (b.size() <= prefix.size() || b[prefix.size()] != '_') continue;
+    if (b == prefix + "_01.pab") return n;      // the base rig, done
+    if (!best) best = n;
+  }
+  return best;
+}
+
 DWORD WINAPI ExportThread(LPVOID arg) {
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
   std::unique_ptr<ExportParams> p(reinterpret_cast<ExportParams *>(arg));
@@ -2424,10 +2460,53 @@ DWORD WINAPI ExportThread(LPVOID arg) {
                  [](unsigned char c) { return (char)::tolower(c); });
   const bool isSkeleton = lowerPath.size() >= 4 &&
                           lowerPath.compare(lowerPath.size() - 4, 4, ".pab") == 0;
+  const bool isSkinned  = lowerPath.size() >= 4 &&
+                          lowerPath.compare(lowerPath.size() - 4, 4, ".pac") == 0;
 
   kukdh1::CryptICE cipher(ICE_KEY, ICE_KEY_LEN);
   if (!ExtractFile(tempPath, info, cipher)) {
     msg = L"Could not extract the model from the archive.";
+  }
+  else if (isSkinned) {
+    SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Locating skeleton...");
+    kukdh1::PacModel mesh;
+    bool loaded = mesh.Load(tempPath);
+    DeleteFile(tempPath.c_str());
+
+    if (!loaded || mesh.IsEmpty()) {
+      msg = L"The character mesh could not be parsed.\r\n\r\n"
+            L"Version 1 .pac files are not supported yet.";
+    }
+    else if (kukdh1::Tree *pSkelNode = FindSkeletonFor(info.sFullPath)) {
+      const kukdh1::FileInfo &sinfo = pSkelNode->GetFileInfo();
+      std::wstring skelTemp = std::wstring(tempDir) + L"paz_export_skel.pab";
+      kukdh1::PabSkeleton skel;
+      bool sok = ExtractFile(skelTemp, sinfo, cipher) && skel.Load(skelTemp);
+      DeleteFile(skelTemp.c_str());
+
+      if (!sok || skel.IsEmpty()) {
+        msg = L"Found a skeleton for this mesh but could not parse it.";
+      }
+      else {
+        SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Writing skinned mesh...");
+        std::wstring err;
+        if (kukdh1::ExportSkinnedModel(mesh, skel, p->wsPath, err)) {
+          ok = true;
+          WCHAR buf[320];
+          swprintf_s(buf,
+            L"Exported %zu verts, %zu tris, %zu submesh(es), skinned to "
+            L"%zu bones.", mesh.TotalVertices(), mesh.TotalTriangles(),
+            mesh.vSubmeshes.size(), skel.vBones.size());
+          msg = buf;
+        } else {
+          msg = err;
+        }
+      }
+    }
+    else {
+      msg = L"No matching .pab skeleton was found in the archive for this "
+            L"mesh, so it cannot be skinned.";
+    }
   }
   else if (isSkeleton) {
     SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Writing skeleton...");
@@ -2520,10 +2599,11 @@ void ExportSelectedModel(HWND hWnd, kukdh1::Tree *pTree) {
                  [](unsigned char c) { return (char)::tolower(c); });
 
   const bool isSkeleton = (ext == ".pab");
-  if (ext != ".pam" && !isSkeleton) {
+  const bool isSkinned  = (ext == ".pac");
+  if (ext != ".pam" && !isSkeleton && !isSkinned) {
     MessageBoxW(hWnd,
-      L"Only .pam models and .pab skeletons can be exported.\r\n\r\n"
-      L"Select one in the tree and try again.",
+      L"Only .pam models, .pac character meshes and .pab skeletons can be "
+      L"exported.\r\n\r\nSelect one in the tree and try again.",
       L"Export Model", MB_OK | MB_ICONINFORMATION);
     return;
   }
@@ -2535,29 +2615,33 @@ void ExportSelectedModel(HWND hWnd, kukdh1::Tree *pTree) {
   std::wstring wBase;
   kukdh1::ConvertWidechar(base, wBase);
 
-  // OBJ cannot represent a bone hierarchy, so a skeleton offers FBX only.
+  // Neither a bone hierarchy nor a skin survives OBJ, so those offer FBX only.
+  const bool fbxOnly = isSkeleton || isSkinned;
   const COMDLG_FILTERSPEC meshFilters[] = {
     { L"Wavefront OBJ (*.obj)",  L"*.obj" },
     { L"Autodesk FBX (*.fbx)",   L"*.fbx" },
   };
-  const COMDLG_FILTERSPEC skelFilters[] = {
+  const COMDLG_FILTERSPEC fbxFilters[] = {
     { L"Autodesk FBX (*.fbx)",   L"*.fbx" },
   };
 
   std::wstring startDir;
   app.CSetting.getData(SETTING_LAST_EXPORT, startDir, L"");
 
+  const wchar_t *title = isSkeleton ? L"Export Skeleton"
+                       : isSkinned  ? L"Export Character Mesh"
+                                    : L"Export Model";
+
   UINT filterIndex = 1;
   std::wstring outPath;
-  if (!kukdh1::SaveFileDialog(hWnd,
-                              isSkeleton ? L"Export Skeleton" : L"Export Model",
-                              (wBase + (isSkeleton ? L".fbx" : L".obj")).c_str(),
-                              isSkeleton ? skelFilters : meshFilters,
-                              isSkeleton ? ARRAYSIZE(skelFilters) : ARRAYSIZE(meshFilters),
+  if (!kukdh1::SaveFileDialog(hWnd, title,
+                              (wBase + (fbxOnly ? L".fbx" : L".obj")).c_str(),
+                              fbxOnly ? fbxFilters : meshFilters,
+                              fbxOnly ? ARRAYSIZE(fbxFilters) : ARRAYSIZE(meshFilters),
                               startDir.c_str(), filterIndex, outPath))
     return;
 
-  kukdh1::PamExportFormat fmt = (isSkeleton || filterIndex == 2)
+  kukdh1::PamExportFormat fmt = (fbxOnly || filterIndex == 2)
                                   ? kukdh1::PAM_EXPORT_FBX
                                   : kukdh1::PAM_EXPORT_OBJ;
 

@@ -97,6 +97,7 @@
     <ClCompile Include="Main.cpp" />
     <ClCompile Include="MetaFile.cpp" />
     <ClCompile Include="PabSkeleton.cpp" />
+    <ClCompile Include="PacModel.cpp" />
     <ClCompile Include="PamExport.cpp" />
     <ClCompile Include="PamModel.cpp" />
     <ClCompile Include="PamRender.cpp" />
@@ -112,6 +113,7 @@
     <ClInclude Include="Main.h" />
     <ClInclude Include="MetaFile.h" />
     <ClInclude Include="PabSkeleton.h" />
+    <ClInclude Include="PacModel.h" />
     <ClInclude Include="PamExport.h" />
     <ClInclude Include="PamModel.h" />
     <ClInclude Include="PamRender.h" />

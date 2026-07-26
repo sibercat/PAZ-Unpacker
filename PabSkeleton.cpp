@@ -19,6 +19,9 @@ namespace {
   constexpr size_t OFF_SCALE  = 0x104;
   constexpr size_t OFF_QUAT   = 0x110;
   constexpr size_t OFF_TRANS  = 0x120;
+  // Runs to payload+306, i.e. two bytes past BONE_PAYLOAD, which is why the
+  // gap between records is two bytes wider than the payload itself.
+  constexpr size_t OFF_BONEID = 0x12E;
 
   // Bytes between the end of one payload and the start of the next record:
   // a fixed 2-byte gap, plus an optional 24/36/56/60-byte block. The flag
@@ -142,6 +145,9 @@ bool PabSkeleton::LoadFromMemory(const uint8_t *pData, size_t stSize) {
     for (int k = 0; k < 4; k++) b.fQuat[k]  = Read<float>(pData + payload + OFF_QUAT  + 4 * k);
     for (int k = 0; k < 3; k++) b.fTrans[k] = Read<float>(pData + payload + OFF_TRANS + 4 * k);
 
+    b.bHasId  = (payload + OFF_BONEID + 4 <= stSize);
+    b.uiBoneId = b.bHasId ? Read<uint32_t>(pData + payload + OFF_BONEID) : 0;
+
     // A non-normal quaternion means the offsets have drifted; that is the
     // cheapest reliable check that this record was read at the right place.
     // The tolerance is deliberately loose: some shipped bones are up to ~1%
@@ -186,6 +192,51 @@ bool PabSkeleton::LoadFromMemory(const uint8_t *pData, size_t stSize) {
   if (off != stSize)               { Clear(); return false; }
   if (vBones.size() != uiBoneCount) { Clear(); return false; }
   return true;
+}
+
+int PabSkeleton::FindBoneById(uint32_t uiId) const {
+  for (size_t i = 0; i < vBones.size(); i++)
+    if (vBones[i].bHasId && vBones[i].uiBoneId == uiId) return (int)i;
+  return -1;
+}
+
+void PabSkeleton::ComputeWorldMatrices(std::vector<float> &vOut16) const {
+  vOut16.assign(vBones.size() * 16, 0.0f);
+  if (vBones.empty()) return;
+
+  for (size_t i = 0; i < vBones.size(); i++) {
+    const PabBone &b = vBones[i];
+
+    float x = b.fQuat[0], y = b.fQuat[1], z = b.fQuat[2], w = b.fQuat[3];
+    const float n = std::sqrt(x*x + y*y + z*z + w*w);
+    if (n > 0.0f) { x /= n; y /= n; z /= n; w /= n; }
+
+    // Local basis, scaled. Row r holds the image of axis r.
+    const float R[9] = {
+      1 - 2*(y*y + z*z),     2*(x*y - z*w),     2*(x*z + y*w),
+          2*(x*y + z*w), 1 - 2*(x*x + z*z),     2*(y*z - x*w),
+          2*(x*z - y*w),     2*(y*z + x*w), 1 - 2*(x*x + y*y),
+    };
+    float L[16] = {};
+    for (int r = 0; r < 3; r++)
+      for (int c = 0; c < 3; c++)
+        L[r * 4 + c] = R[r * 3 + c] * b.fScale[r];
+    L[12] = b.fTrans[0]; L[13] = b.fTrans[1]; L[14] = b.fTrans[2]; L[15] = 1.0f;
+
+    float *W = &vOut16[i * 16];
+    if (b.iParent < 0) { memcpy(W, L, sizeof(L)); continue; }
+
+    // W = L * parentW, with row vectors, so the translation row picks up the
+    // parent's rotation and offset the same way the basis rows do.
+    const float *P = &vOut16[(size_t)b.iParent * 16];
+    for (int r = 0; r < 4; r++) {
+      for (int c = 0; c < 4; c++) {
+        float s = 0.0f;
+        for (int k = 0; k < 4; k++) s += L[r * 4 + k] * P[k * 4 + c];
+        W[r * 4 + c] = s;
+      }
+    }
+  }
 }
 
 void PabSkeleton::ComputeWorldPositions(std::vector<float> &vOutXYZ) const {

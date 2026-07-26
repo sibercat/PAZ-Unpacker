@@ -827,6 +827,302 @@ namespace kukdh1 {
       return true;
     }
 
+    // ── Skinned mesh export ──────────────────────────────────────────────────
+
+    // Inverse of a rigid transform stored the way FBX lays one out (basis rows,
+    // translation at 12..14). Bones carry rotation and translation only, so the
+    // rotation part transposes and the translation negates through it. Using a
+    // general inverse here would be slower and less numerically clean.
+    void InvertRigid(const float *m, double *out) {
+      for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++)
+          out[r * 4 + c] = m[c * 4 + r];
+      for (int c = 0; c < 3; c++) {
+        double t = 0.0;
+        for (int k = 0; k < 3; k++) t += (double)m[12 + k] * m[k * 4 + c];
+        out[12 + c] = -t;
+      }
+      out[3] = out[7] = out[11] = 0.0;
+      out[15] = 1.0;
+    }
+
+    bool WriteSkinnedFbx(const PacModel &model, const PabSkeleton &skel,
+                         const std::wstring &wsPath, std::wstring &wsError) {
+      if (skel.IsEmpty()) { wsError = L"The skeleton has no bones."; return false; }
+
+      // Resolve the mesh's bone palette onto the skeleton by bone id. If this
+      // fails the two files do not belong together, and binding anyway would
+      // silently produce a mangled skin.
+      std::vector<int> paletteToBone(model.vBonePalette.size(), -1);
+      size_t unresolved = 0;
+      for (size_t i = 0; i < model.vBonePalette.size(); i++) {
+        paletteToBone[i] = skel.FindBoneById(model.vBonePalette[i]);
+        if (paletteToBone[i] < 0) unresolved++;
+      }
+      if (unresolved) {
+        wchar_t buf[192];
+        swprintf_s(buf,
+          L"%zu of %zu bone palette entries are not in this skeleton.\r\n"
+          L"The mesh and skeleton probably belong to different characters.",
+          unresolved, model.vBonePalette.size());
+        wsError = buf;
+        return false;
+      }
+
+      std::ofstream f(wsPath, std::ios::binary);
+      if (!f) { wsError = L"Could not open the .fbx file for writing."; return false; }
+
+      // Flatten every submesh into one mesh; FBX handles per-face materials,
+      // and a single skin keeps the cluster bookkeeping manageable.
+      std::vector<double>  verts, normals, uvs;
+      std::vector<int32_t> polyIdx, uvIdx;
+      // Per bone: the vertices it influences and by how much.
+      std::vector<std::vector<int32_t>> clusterIdx(skel.vBones.size());
+      std::vector<std::vector<double>>  clusterWgt(skel.vBones.size());
+
+      int32_t base = 0;
+      for (const auto &sm : model.vSubmeshes) {
+        for (const auto &v : sm.vVertices) {
+          verts.push_back(v.x);  verts.push_back(v.y);  verts.push_back(v.z);
+          normals.push_back(v.nx); normals.push_back(v.ny); normals.push_back(v.nz);
+          uvs.push_back(v.u);    uvs.push_back(1.0 - v.v);   // FBX UV origin is bottom-left
+        }
+        for (size_t i = 0; i + 2 < sm.vIndices.size(); i += 3) {
+          const int32_t a = base + (int32_t)sm.vIndices[i + 0];
+          const int32_t b = base + (int32_t)sm.vIndices[i + 1];
+          const int32_t c = base + (int32_t)sm.vIndices[i + 2];
+          polyIdx.push_back(a); polyIdx.push_back(b); polyIdx.push_back(~c);
+          uvIdx.push_back(a);   uvIdx.push_back(b);   uvIdx.push_back(c);
+        }
+        for (size_t i = 0; i < sm.vVertices.size(); i++) {
+          const auto &v = sm.vVertices[i];
+          // Weights are quantised to 8 bits and sum to about 255, so normalise
+          // against the actual total rather than assuming exactly 255.
+          int total = 0;
+          for (int k = 0; k < 4; k++) total += v.weight[k];
+          if (!total) continue;
+          for (int k = 0; k < 4; k++) {
+            if (!v.weight[k]) continue;
+            const int bone = paletteToBone[v.bone[k]];
+            clusterIdx[bone].push_back(base + (int32_t)i);
+            clusterWgt[bone].push_back((double)v.weight[k] / (double)total);
+          }
+        }
+        base += (int32_t)sm.vVertices.size();
+      }
+
+      std::vector<float> world;
+      skel.ComputeWorldMatrices(world);
+
+      // Only bones that actually influence something need a cluster.
+      std::vector<size_t> active;
+      for (size_t b = 0; b < skel.vBones.size(); b++)
+        if (!clusterIdx[b].empty()) active.push_back(b);
+
+      const std::string stem = StemOf(wsPath);
+
+      const int64_t idGeometry  = 1000000;
+      const int64_t idModel     = 2000000;
+      const int64_t idSkin      = 3000000;
+      const int64_t idPose      = 4000000;
+      const int64_t idModelBase = 6000000;
+      const int64_t idAttrBase  = 7000000;
+      const int64_t idClusBase  = 8000000;
+
+      std::vector<FbxNode> roots;
+      BuildFbxPreamble(roots);
+
+      {
+        FbxNode defs("Definitions");
+        defs.Child("Version").I32(100);
+        defs.Child("Count").I32((int32_t)(3 + skel.vBones.size() * 2 + active.size() + 1));
+        { FbxNode &o = defs.Child("ObjectType"); o.Str("GlobalSettings"); o.Child("Count").I32(1); }
+        { FbxNode &o = defs.Child("ObjectType"); o.Str("Geometry");  o.Child("Count").I32(1); }
+        { FbxNode &o = defs.Child("ObjectType"); o.Str("Model");
+          o.Child("Count").I32((int32_t)(1 + skel.vBones.size())); }
+        { FbxNode &o = defs.Child("ObjectType"); o.Str("NodeAttribute");
+          o.Child("Count").I32((int32_t)skel.vBones.size()); }
+        { FbxNode &o = defs.Child("ObjectType"); o.Str("Deformer");
+          o.Child("Count").I32((int32_t)(1 + active.size())); }
+        { FbxNode &o = defs.Child("ObjectType"); o.Str("Pose"); o.Child("Count").I32(1); }
+        roots.push_back(std::move(defs));
+      }
+
+      {
+        FbxNode objs("Objects");
+
+        FbxNode &geo = objs.Child("Geometry");
+        geo.I64(idGeometry);
+        geo.NameClass(stem, "Geometry");
+        geo.Str("Mesh");
+        geo.Child("Properties70");
+        geo.Child("GeometryVersion").I32(124);
+        geo.Child("Vertices").ArrF64(verts);
+        geo.Child("PolygonVertexIndex").ArrI32(polyIdx);
+        {
+          FbxNode &n = geo.Child("LayerElementNormal");
+          n.I32(0);
+          n.Child("Version").I32(101);
+          n.Child("Name").Str("");
+          n.Child("MappingInformationType").Str("ByVertice");
+          n.Child("ReferenceInformationType").Str("Direct");
+          n.Child("Normals").ArrF64(normals);
+        }
+        {
+          FbxNode &n = geo.Child("LayerElementUV");
+          n.I32(0);
+          n.Child("Version").I32(101);
+          n.Child("Name").Str("UVMap");
+          n.Child("MappingInformationType").Str("ByPolygonVertex");
+          n.Child("ReferenceInformationType").Str("IndexToDirect");
+          n.Child("UV").ArrF64(uvs);
+          n.Child("UVIndex").ArrI32(uvIdx);
+        }
+        {
+          FbxNode &lay = geo.Child("Layer");
+          lay.I32(0);
+          lay.Child("Version").I32(100);
+          { FbxNode &e = lay.Child("LayerElement");
+            e.Child("Type").Str("LayerElementNormal"); e.Child("TypedIndex").I32(0); }
+          { FbxNode &e = lay.Child("LayerElement");
+            e.Child("Type").Str("LayerElementUV"); e.Child("TypedIndex").I32(0); }
+        }
+
+        FbxNode &mdl = objs.Child("Model");
+        mdl.I64(idModel);
+        mdl.NameClass(stem, "Model");
+        mdl.Str("Mesh");
+        mdl.Child("Version").I32(232);
+        mdl.Child("Properties70");
+        mdl.Child("Shading").Bool(true);
+        mdl.Child("Culling").Str("CullingOff");
+
+        for (size_t i = 0; i < skel.vBones.size(); i++) {
+          const PabBone &b = skel.vBones[i];
+
+          FbxNode &attr = objs.Child("NodeAttribute");
+          attr.I64(idAttrBase + (int64_t)i);
+          attr.NameClass(b.sName, "NodeAttribute");
+          attr.Str("LimbNode");
+          { FbxNode &p70 = attr.Child("Properties70");
+            FbxNode &p = p70.Child("P"); p.P("Size", "double", "Number", ""); p.F64(1.0); }
+          attr.Child("TypeFlags").Str("Skeleton");
+
+          double euler[3];
+          QuatToEulerXYZDeg(b.fQuat, euler);
+
+          FbxNode &bm = objs.Child("Model");
+          bm.I64(idModelBase + (int64_t)i);
+          bm.NameClass(b.sName, "Model");
+          bm.Str("LimbNode");
+          bm.Child("Version").I32(232);
+          {
+            FbxNode &p70 = bm.Child("Properties70");
+            { FbxNode &p = p70.Child("P"); p.P("RotationActive", "bool", "", ""); p.I32(1); }
+            { FbxNode &p = p70.Child("P"); p.P("InheritType", "enum", "", ""); p.I32(1); }
+            { FbxNode &p = p70.Child("P"); p.P("Lcl Translation", "Lcl Translation", "", "A");
+              p.F64(b.fTrans[0]); p.F64(b.fTrans[1]); p.F64(b.fTrans[2]); }
+            { FbxNode &p = p70.Child("P"); p.P("Lcl Rotation", "Lcl Rotation", "", "A");
+              p.F64(euler[0]); p.F64(euler[1]); p.F64(euler[2]); }
+            { FbxNode &p = p70.Child("P"); p.P("Lcl Scaling", "Lcl Scaling", "", "A");
+              p.F64(b.fScale[0]); p.F64(b.fScale[1]); p.F64(b.fScale[2]); }
+          }
+          bm.Child("Shading").Bool(true);
+          bm.Child("Culling").Str("CullingOff");
+        }
+
+        {
+          FbxNode &skin = objs.Child("Deformer");
+          skin.I64(idSkin);
+          skin.NameClass(stem + "_skin", "Deformer");
+          skin.Str("Skin");
+          skin.Child("Version").I32(101);
+          skin.Child("Link_DeformAcceptance").F64(0.0);
+          skin.Child("SkinningType").Str("Linear");
+        }
+
+        for (size_t k = 0; k < active.size(); k++) {
+          const size_t b = active[k];
+          FbxNode &cl = objs.Child("Deformer");
+          cl.I64(idClusBase + (int64_t)k);
+          cl.NameClass(skel.vBones[b].sName + "_cluster", "SubDeformer");
+          cl.Str("Cluster");
+          cl.Child("Version").I32(100);
+          { FbxNode &u = cl.Child("UserData"); u.Str(""); u.Str(""); }
+          cl.Child("Indexes").ArrI32(clusterIdx[b]);
+          cl.Child("Weights").ArrF64(clusterWgt[b]);
+
+          // Transform takes the mesh into the bone's space at bind time and
+          // TransformLink is the bone's world transform; the mesh itself sits
+          // at the origin, so Transform is simply the inverse.
+          const float *W = &world[b * 16];
+          double inv[16];
+          InvertRigid(W, inv);
+          std::vector<double> tr(inv, inv + 16), lk(16);
+          for (int i = 0; i < 16; i++) lk[i] = W[i];
+          cl.Child("Transform").ArrF64(tr);
+          cl.Child("TransformLink").ArrF64(lk);
+        }
+
+        {
+          FbxNode &pose = objs.Child("Pose");
+          pose.I64(idPose);
+          pose.NameClass(stem + "_bindpose", "Pose");
+          pose.Str("BindPose");
+          pose.Child("Type").Str("BindPose");
+          pose.Child("Version").I32(100);
+          pose.Child("NbPoseNodes").I32((int32_t)(1 + skel.vBones.size()));
+          {
+            FbxNode &pn = pose.Child("PoseNode");
+            pn.Child("Node").I64(idModel);
+            std::vector<double> ident(16, 0.0);
+            ident[0] = ident[5] = ident[10] = ident[15] = 1.0;
+            pn.Child("Matrix").ArrF64(ident);
+          }
+          for (size_t i = 0; i < skel.vBones.size(); i++) {
+            FbxNode &pn = pose.Child("PoseNode");
+            pn.Child("Node").I64(idModelBase + (int64_t)i);
+            std::vector<double> m(16);
+            for (int k = 0; k < 16; k++) m[k] = world[i * 16 + k];
+            pn.Child("Matrix").ArrF64(m);
+          }
+        }
+
+        roots.push_back(std::move(objs));
+      }
+
+      {
+        FbxNode conn("Connections");
+        { FbxNode &c = conn.Child("C"); c.Str("OO"); c.I64(idGeometry); c.I64(idModel); }
+        { FbxNode &c = conn.Child("C"); c.Str("OO"); c.I64(idModel);    c.I64(0); }
+        for (size_t i = 0; i < skel.vBones.size(); i++) {
+          { FbxNode &c = conn.Child("C"); c.Str("OO");
+            c.I64(idAttrBase + (int64_t)i); c.I64(idModelBase + (int64_t)i); }
+          const int32_t par = skel.vBones[i].iParent;
+          { FbxNode &c = conn.Child("C"); c.Str("OO");
+            c.I64(idModelBase + (int64_t)i);
+            c.I64(par < 0 ? 0 : idModelBase + (int64_t)par); }
+        }
+        // Skin deforms the geometry; each cluster belongs to the skin and is
+        // driven by one bone.
+        { FbxNode &c = conn.Child("C"); c.Str("OO"); c.I64(idSkin); c.I64(idGeometry); }
+        for (size_t k = 0; k < active.size(); k++) {
+          { FbxNode &c = conn.Child("C"); c.Str("OO");
+            c.I64(idClusBase + (int64_t)k); c.I64(idSkin); }
+          { FbxNode &c = conn.Child("C"); c.Str("OO");
+            c.I64(idModelBase + (int64_t)active[k]); c.I64(idClusBase + (int64_t)k); }
+        }
+        roots.push_back(std::move(conn));
+      }
+
+      { FbxNode takes("Takes"); takes.Child("Current").Str(""); roots.push_back(std::move(takes)); }
+
+      EmitFbxFile(f, roots);
+
+      if (!f) { wsError = L"Failed while writing the .fbx file."; return false; }
+      return true;
+    }
+
   } // namespace
 
   const wchar_t *ExportExtension(PamExportFormat format) {
@@ -865,6 +1161,16 @@ namespace kukdh1 {
     }
     // OBJ has no concept of a node hierarchy, so FBX is the only option here.
     return WriteSkeletonFbx(skel, wsPath, wsError);
+  }
+
+  bool ExportSkinnedModel(const PacModel &model, const PabSkeleton &skel,
+                          const std::wstring &wsPath, std::wstring &wsError) {
+    wsError.clear();
+    if (model.IsEmpty()) {
+      wsError = L"The model has no geometry to export.";
+      return false;
+    }
+    return WriteSkinnedFbx(model, skel, wsPath, wsError);
   }
 
 }
