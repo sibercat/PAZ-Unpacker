@@ -51,6 +51,7 @@ namespace kukdh1 {
   // resolved against the skeleton by bone id, so the two files must belong
   // together; wsError explains it if they do not. FBX only.
   bool ExportSkinnedModel(const PacModel &model, const PabSkeleton &skel,
+                          const PamTextureFileList &vTextureFiles,
                           const std::wstring &wsPath, std::wstring &wsError);
 
 }

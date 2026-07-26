@@ -1014,6 +1014,7 @@ namespace kukdh1 {
     }
 
     bool WriteSkinnedFbx(const PacModel &model, const PabSkeleton &skel,
+                         const PamTextureFileList &vTextureFiles,
                          const std::wstring &wsPath, std::wstring &wsError) {
       if (skel.IsEmpty()) { wsError = L"The skeleton has no bones."; return false; }
 
@@ -1042,12 +1043,13 @@ namespace kukdh1 {
       // Flatten every submesh into one mesh; FBX handles per-face materials,
       // and a single skin keeps the cluster bookkeeping manageable.
       std::vector<double>  verts, normals, uvs;
-      std::vector<int32_t> polyIdx, uvIdx;
+      std::vector<int32_t> polyIdx, uvIdx, matPerPoly;
       // Per bone: the vertices it influences and by how much.
       std::vector<std::vector<int32_t>> clusterIdx(skel.vBones.size());
       std::vector<std::vector<double>>  clusterWgt(skel.vBones.size());
 
       int32_t base = 0;
+      int32_t smIndex = 0;
       for (const auto &sm : model.vSubmeshes) {
         for (const auto &v : sm.vVertices) {
           verts.push_back(v.x);  verts.push_back(v.y);  verts.push_back(v.z);
@@ -1060,6 +1062,7 @@ namespace kukdh1 {
           const int32_t c = base + (int32_t)sm.vIndices[i + 2];
           polyIdx.push_back(a); polyIdx.push_back(b); polyIdx.push_back(~c);
           uvIdx.push_back(a);   uvIdx.push_back(b);   uvIdx.push_back(c);
+          matPerPoly.push_back(smIndex);
         }
         for (size_t i = 0; i < sm.vVertices.size(); i++) {
           const auto &v = sm.vVertices[i];
@@ -1076,7 +1079,13 @@ namespace kukdh1 {
           }
         }
         base += (int32_t)sm.vVertices.size();
+        smIndex++;
       }
+
+      // Submeshes whose texture was resolved get a Texture + Video pair.
+      std::vector<size_t> texSlots;
+      for (size_t s = 0; s < model.vSubmeshes.size(); s++)
+        if (s < vTextureFiles.size() && !vTextureFiles[s].empty()) texSlots.push_back(s);
 
       std::vector<float> world;
       skel.ComputeWorldMatrices(world);
@@ -1092,9 +1101,13 @@ namespace kukdh1 {
       const int64_t idModel     = 2000000;
       const int64_t idSkin      = 3000000;
       const int64_t idPose      = 4000000;
+      const int64_t idMatBase   = 5000000;
       const int64_t idModelBase = 6000000;
       const int64_t idAttrBase  = 7000000;
       const int64_t idClusBase  = 8000000;
+      const int64_t idTexBase   = 12000000;
+      const int64_t idVidBase   = 13000000;
+      const size_t  nMat        = model.vSubmeshes.size();
 
       std::vector<FbxNode> roots;
       BuildFbxPreamble(roots);
@@ -1102,7 +1115,8 @@ namespace kukdh1 {
       {
         FbxNode defs("Definitions");
         defs.Child("Version").I32(100);
-        defs.Child("Count").I32((int32_t)(3 + skel.vBones.size() * 2 + active.size() + 1));
+        defs.Child("Count").I32((int32_t)(3 + skel.vBones.size() * 2 + active.size() + 1
+                                          + nMat + 2 * texSlots.size()));
         { FbxNode &o = defs.Child("ObjectType"); o.Str("GlobalSettings"); o.Child("Count").I32(1); }
         { FbxNode &o = defs.Child("ObjectType"); o.Str("Geometry");  o.Child("Count").I32(1); }
         { FbxNode &o = defs.Child("ObjectType"); o.Str("Model");
@@ -1112,6 +1126,14 @@ namespace kukdh1 {
         { FbxNode &o = defs.Child("ObjectType"); o.Str("Deformer");
           o.Child("Count").I32((int32_t)(1 + active.size())); }
         { FbxNode &o = defs.Child("ObjectType"); o.Str("Pose"); o.Child("Count").I32(1); }
+        { FbxNode &o = defs.Child("ObjectType"); o.Str("Material");
+          o.Child("Count").I32((int32_t)nMat); }
+        if (!texSlots.empty()) {
+          { FbxNode &o = defs.Child("ObjectType"); o.Str("Texture");
+            o.Child("Count").I32((int32_t)texSlots.size()); }
+          { FbxNode &o = defs.Child("ObjectType"); o.Str("Video");
+            o.Child("Count").I32((int32_t)texSlots.size()); }
+        }
         roots.push_back(std::move(defs));
       }
 
@@ -1146,6 +1168,17 @@ namespace kukdh1 {
           n.Child("UVIndex").ArrI32(uvIdx);
         }
         {
+          // One material per submesh, assigned per triangle, so a flattened
+          // mesh still shows the right texture on each part.
+          FbxNode &n = geo.Child("LayerElementMaterial");
+          n.I32(0);
+          n.Child("Version").I32(101);
+          n.Child("Name").Str("");
+          n.Child("MappingInformationType").Str("ByPolygon");
+          n.Child("ReferenceInformationType").Str("IndexToDirect");
+          n.Child("Materials").ArrI32(matPerPoly);
+        }
+        {
           FbxNode &lay = geo.Child("Layer");
           lay.I32(0);
           lay.Child("Version").I32(100);
@@ -1153,6 +1186,8 @@ namespace kukdh1 {
             e.Child("Type").Str("LayerElementNormal"); e.Child("TypedIndex").I32(0); }
           { FbxNode &e = lay.Child("LayerElement");
             e.Child("Type").Str("LayerElementUV"); e.Child("TypedIndex").I32(0); }
+          { FbxNode &e = lay.Child("LayerElement");
+            e.Child("Type").Str("LayerElementMaterial"); e.Child("TypedIndex").I32(0); }
         }
 
         FbxNode &mdl = objs.Child("Model");
@@ -1196,6 +1231,54 @@ namespace kukdh1 {
           }
           bm.Child("Shading").Bool(true);
           bm.Child("Culling").Str("CullingOff");
+        }
+
+        for (size_t s = 0; s < nMat; s++) {
+          const std::string mname = SanitiseMaterialName(model.vSubmeshes[s].sName, s);
+          FbxNode &mat = objs.Child("Material");
+          mat.I64(idMatBase + (int64_t)s);
+          mat.NameClass(mname, "Material");
+          mat.Str("");
+          mat.Child("Version").I32(102);
+          mat.Child("ShadingModel").Str("Phong");
+          mat.Child("MultiLayer").I32(0);
+          FbxNode &p70 = mat.Child("Properties70");
+          { FbxNode &p = p70.Child("P"); p.P("ShadingModel", "KString", "", ""); p.Str("Phong"); }
+          { FbxNode &p = p70.Child("P"); p.P("DiffuseColor", "Color", "", "A");
+            p.F64(0.8); p.F64(0.8); p.F64(0.8); }
+          { FbxNode &p = p70.Child("P"); p.P("DiffuseFactor", "Number", "", "A"); p.F64(1.0); }
+          { FbxNode &p = p70.Child("P"); p.P("SpecularFactor", "Number", "", "A"); p.F64(0.0); }
+          { FbxNode &p = p70.Child("P"); p.P("Opacity", "Number", "", "A"); p.F64(1.0); }
+        }
+
+        for (size_t k = 0; k < texSlots.size(); k++) {
+          const size_t s = texSlots[k];
+          const std::string &file = vTextureFiles[s];
+          const std::string tname = SanitiseMaterialName(model.vSubmeshes[s].sName, s);
+
+          FbxNode &tex = objs.Child("Texture");
+          tex.I64(idTexBase + (int64_t)k);
+          tex.NameClass(tname + "_tex", "Texture");
+          tex.Str("");
+          tex.Child("Type").Str("TextureVideoClip");
+          tex.Child("Version").I32(202);
+          tex.Child("TextureName").Str(tname + "_tex" + std::string("\0\x01""Texture", 9));
+          tex.Child("Properties70");
+          tex.Child("Media").Str(tname + "_vid" + std::string("\0\x01""Video", 7));
+          tex.Child("FileName").Str(file);
+          tex.Child("RelativeFilename").Str(file);
+          tex.Child("ModelUVTranslation").F64(0.0), tex.Child("ModelUVScaling").F64(1.0);
+          tex.Child("Texture_Alpha_Source").Str("None");
+
+          FbxNode &vid = objs.Child("Video");
+          vid.I64(idVidBase + (int64_t)k);
+          vid.NameClass(tname + "_vid", "Video");
+          vid.Str("Clip");
+          vid.Child("Type").Str("Clip");
+          vid.Child("Properties70");
+          vid.Child("UseMipMap").I32(0);
+          vid.Child("Filename").Str(file);
+          vid.Child("RelativeFilename").Str(file);
         }
 
         {
@@ -1269,6 +1352,18 @@ namespace kukdh1 {
           { FbxNode &c = conn.Child("C"); c.Str("OO");
             c.I64(idModelBase + (int64_t)i);
             c.I64(par < 0 ? 0 : idModelBase + (int64_t)par); }
+        }
+        for (size_t s = 0; s < nMat; s++) {
+          FbxNode &c = conn.Child("C");
+          c.Str("OO"); c.I64(idMatBase + (int64_t)s); c.I64(idModel);
+        }
+        for (size_t k = 0; k < texSlots.size(); k++) {
+          const size_t s = texSlots[k];
+          { FbxNode &c = conn.Child("C"); c.Str("OP");
+            c.I64(idTexBase + (int64_t)k); c.I64(idMatBase + (int64_t)s);
+            c.Str("DiffuseColor"); }
+          { FbxNode &c = conn.Child("C"); c.Str("OO");
+            c.I64(idVidBase + (int64_t)k); c.I64(idTexBase + (int64_t)k); }
         }
         // Skin deforms the geometry; each cluster belongs to the skin and is
         // driven by one bone.
@@ -1350,13 +1445,14 @@ namespace kukdh1 {
   }
 
   bool ExportSkinnedModel(const PacModel &model, const PabSkeleton &skel,
+                          const PamTextureFileList &vTextureFiles,
                           const std::wstring &wsPath, std::wstring &wsError) {
     wsError.clear();
     if (model.IsEmpty()) {
       wsError = L"The model has no geometry to export.";
       return false;
     }
-    return WriteSkinnedFbx(model, skel, wsPath, wsError);
+    return WriteSkinnedFbx(model, skel, vTextureFiles, wsPath, wsError);
   }
 
 }

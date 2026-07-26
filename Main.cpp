@@ -2398,6 +2398,81 @@ static void ExportModelTextures(const kukdh1::PamModel &model,
   }
 }
 
+// Extracts a single .dds from the archive by file name and writes it into
+// wsOutDir as a .png. Returns the written file name, or empty if the texture
+// is not in the archive.
+static std::string ExtractTextureByName(const std::string &sDdsName,
+                                        const std::wstring &wsOutDir,
+                                        kukdh1::Crypt &cipher) {
+  kukdh1::Tree *node = nullptr;
+  for (auto *n : GetCachedFileNodes()) {
+    const std::string &nm = n->GetName();
+    if (nm.size() == sDdsName.size() && _stricmp(nm.c_str(), sDdsName.c_str()) == 0) {
+      node = n;
+      break;
+    }
+  }
+  if (!node) return std::string();
+
+  WCHAR tempDir[MAX_PATH];
+  GetTempPath(MAX_PATH, tempDir);
+
+  std::wstring wName;
+  kukdh1::ConvertWidechar(sDdsName, wName);
+  std::wstring tempPath = std::wstring(tempDir) + L"paz_export_" + wName;
+
+  std::string pngName;
+  if (ExtractFile(tempPath, node->GetFileInfo(), cipher)) {
+    std::wstring wPng = wName;
+    size_t dot = wPng.find_last_of(L'.');
+    if (dot != std::wstring::npos) wPng = wPng.substr(0, dot);
+    wPng += L".png";
+    if (SaveTextureAsPng(tempPath, wsOutDir + L"\\" + wPng)) {
+      pngName.reserve(wPng.size());
+      for (wchar_t c : wPng) pngName.push_back((c < 128) ? (char)c : '_');
+    }
+    DeleteFile(tempPath.c_str());
+  }
+  return pngName;
+}
+
+// A .pac names no texture file. The convention is that the submesh name is
+// the texture name: submesh "PGW_00_LB_0227" is served by
+// character/texture/pgw_00_lb_0227.dds, with "_n" alongside for the normal
+// map. Both are written next to the model so nothing has to be hunted for.
+static void ExportPacTextures(const kukdh1::PacModel &model,
+                              const std::wstring &wsOutDir,
+                              kukdh1::PamTextureFileList &vOutFiles,
+                              size_t &nDiffuse, size_t &nNormal) {
+  vOutFiles.assign(model.vSubmeshes.size(), std::string());
+  nDiffuse = nNormal = 0;
+  if (!app.CTree) return;
+
+  kukdh1::CryptICE cipher(ICE_KEY, ICE_KEY_LEN);
+  std::unordered_map<std::string, std::string> done;
+
+  for (size_t i = 0; i < model.vSubmeshes.size(); i++) {
+    std::string base = model.vSubmeshes[i].sName;
+    if (base.empty()) continue;
+
+    std::string key = base;
+    std::transform(key.begin(), key.end(), key.begin(),
+                   [](unsigned char c) { return (char)::tolower(c); });
+
+    auto it = done.find(key);
+    if (it != done.end()) { vOutFiles[i] = it->second; continue; }
+
+    const std::string png = ExtractTextureByName(base + ".dds", wsOutDir, cipher);
+    if (!png.empty()) nDiffuse++;
+    // The normal map is a bonus; it is not referenced by the FBX material but
+    // is what anyone re-authoring the material will want next to the mesh.
+    if (!ExtractTextureByName(base + "_n.dds", wsOutDir, cipher).empty()) nNormal++;
+
+    done[key]    = png;
+    vOutFiles[i] = png;
+  }
+}
+
 struct ExportParams {
   kukdh1::Tree           *pTree;
   std::wstring            wsPath;
@@ -2534,15 +2609,23 @@ DWORD WINAPI ExportThread(LPVOID arg) {
         msg = L"Found a skeleton for this mesh but could not parse it.";
       }
       else {
+        std::wstring dir = std::filesystem::path(p->wsPath).parent_path().wstring();
+
+        SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Exporting textures...");
+        kukdh1::PamTextureFileList texFiles;
+        size_t nDiffuse = 0, nNormal = 0;
+        ExportPacTextures(mesh, dir, texFiles, nDiffuse, nNormal);
+
         SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Writing skinned mesh...");
         std::wstring err;
-        if (kukdh1::ExportSkinnedModel(mesh, skel, p->wsPath, err)) {
+        if (kukdh1::ExportSkinnedModel(mesh, skel, texFiles, p->wsPath, err)) {
           ok = true;
           WCHAR buf[320];
           swprintf_s(buf,
             L"Exported %zu verts, %zu tris, %zu submesh(es), skinned to "
-            L"%zu bones.", mesh.TotalVertices(), mesh.TotalTriangles(),
-            mesh.vSubmeshes.size(), skel.vBones.size());
+            L"%zu bones. Textures: %zu diffuse, %zu normal.",
+            mesh.TotalVertices(), mesh.TotalTriangles(),
+            mesh.vSubmeshes.size(), skel.vBones.size(), nDiffuse, nNormal);
           msg = buf;
         } else {
           msg = err;
