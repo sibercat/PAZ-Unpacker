@@ -15,7 +15,8 @@ namespace kukdh1 {
 
   enum PamExportFormat {
     PAM_EXPORT_OBJ,   // Wavefront OBJ + companion .mtl
-    PAM_EXPORT_FBX    // Autodesk FBX, binary version 7.4
+    PAM_EXPORT_FBX,   // Autodesk FBX, binary version 7.4
+    PAM_EXPORT_PSK    // ActorX .psk, with clips alongside in a .psa
   };
 
   // One entry per submesh: the texture file written next to the model, or an

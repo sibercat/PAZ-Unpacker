@@ -2637,6 +2637,75 @@ static std::wstring ExportCharacterAnimations(const std::string &sPacPath,
   return out;
 }
 
+// Writes every clip belonging to a character into one .psa beside the .psk.
+// Unlike the FBX path this is a single file, because .psa stores the bone table
+// once and appends sequences, so there is no per-clip overhead to weigh up.
+static std::wstring ExportCharacterPsa(const std::string &sPacPath,
+                                       const kukdh1::PabSkeleton &skel,
+                                       const std::wstring &wsPskPath,
+                                       kukdh1::Crypt &cipher) {
+  uint64_t ullBytes = 0;
+  std::vector<kukdh1::Tree *> clips = FindAnimationsFor(sPacPath, ullBytes);
+  if (clips.empty()) return L"\r\n\r\nNo animation clips were found for this character.";
+
+  WCHAR tempDir[MAX_PATH];
+  GetTempPath(MAX_PATH, tempDir);
+  const std::wstring clipTemp = std::wstring(tempDir) + L"paz_export_clip.paa";
+
+  // The animations have to outlive the export call, which only borrows them.
+  std::vector<std::unique_ptr<kukdh1::PaaAnimation>> owned;
+  std::vector<kukdh1::PskAnimClip> list;
+  size_t failed = 0;
+
+  for (size_t i = 0; i < clips.size(); i++) {
+    if (i % 8 == 0) {
+      WCHAR st[96];
+      swprintf_s(st, L"Reading animation %zu of %zu...", i + 1, clips.size());
+      SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)st);
+    }
+
+    const kukdh1::FileInfo &ci = clips[i]->GetFileInfo();
+    auto anim = std::make_unique<kukdh1::PaaAnimation>();
+    if (!ExtractFile(clipTemp, ci, cipher) || !anim->Load(clipTemp) || anim->IsEmpty()) {
+      DeleteFile(clipTemp.c_str());
+      failed++;
+      continue;
+    }
+    DeleteFile(clipTemp.c_str());
+
+    size_t slash = ci.sFullPath.rfind('/');
+    std::string name = (slash != std::string::npos)
+      ? ci.sFullPath.substr(slash + 1) : ci.sFullPath;
+    if (name.size() > 4) name.resize(name.size() - 4);      // drop ".paa"
+
+    list.push_back({ name, anim.get() });
+    owned.push_back(std::move(anim));
+  }
+
+  if (list.empty()) return L"\r\n\r\nNone of this character's clips could be read.";
+
+  std::wstring psa = wsPskPath;
+  size_t dot = psa.find_last_of(L'.');
+  if (dot != std::wstring::npos) psa.resize(dot);
+  psa += L".psa";
+
+  SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Writing animations...");
+  std::wstring err;
+  if (!kukdh1::ExportPsa(skel, list, psa, err))
+    return L"\r\n\r\nThe animations could not be written: " + err;
+
+  WCHAR buf[320];
+  swprintf_s(buf, L"\r\n\r\nAnimations: %zu clips written to \"%s\".",
+             list.size(), std::filesystem::path(psa).filename().c_str());
+  std::wstring out = buf;
+  if (failed) {
+    WCHAR extra[128];
+    swprintf_s(extra, L"\r\n%zu could not be read.", failed);
+    out += extra;
+  }
+  return out;
+}
+
 DWORD WINAPI ExportThread(LPVOID arg) {
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
   std::unique_ptr<ExportParams> p(reinterpret_cast<ExportParams *>(arg));
@@ -2743,6 +2812,24 @@ DWORD WINAPI ExportThread(LPVOID arg) {
         size_t nDiffuse = 0, nNormal = 0;
         ExportPacTextures(mesh, dir, texFiles, nDiffuse, nNormal);
 
+        if (p->format == kukdh1::PAM_EXPORT_PSK) {
+          SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Writing ActorX mesh...");
+          std::wstring err;
+          if (kukdh1::ExportPsk(mesh, skel, p->wsPath, err)) {
+            ok = true;
+            WCHAR buf[320];
+            swprintf_s(buf,
+              L"Exported %zu verts, %zu tris, %zu submesh(es), skinned to "
+              L"%zu bones. Textures: %zu diffuse, %zu normal.",
+              mesh.TotalVertices(), mesh.TotalTriangles(),
+              mesh.vSubmeshes.size(), skel.vBones.size(), nDiffuse, nNormal);
+            msg = buf;
+            msg += ExportCharacterPsa(info.sFullPath, skel, p->wsPath, cipher);
+          } else {
+            msg = err;
+          }
+        }
+        else {
         SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Writing skinned mesh...");
         std::wstring err;
         if (kukdh1::ExportSkinnedModel(mesh, skel, texFiles, p->wsPath, err)) {
@@ -2760,6 +2847,7 @@ DWORD WINAPI ExportThread(LPVOID arg) {
           msg += ExportCharacterAnimations(info.sFullPath, skel, p->wsPath, cipher);
         } else {
           msg = err;
+        }
         }
       }
     }
@@ -2893,6 +2981,14 @@ void ExportSelectedModel(HWND hWnd, kukdh1::Tree *pTree) {
   const COMDLG_FILTERSPEC fbxFilters[] = {
     { L"Autodesk FBX (*.fbx)",   L"*.fbx" },
   };
+  // A character mesh can also go out as ActorX. Worth offering because the
+  // format is unambiguous where FBX is not: 3ds Max reads a .psk as a real
+  // bone hierarchy with a working Skin modifier, and the .psa carries every
+  // clip in one file.
+  const COMDLG_FILTERSPEC charFilters[] = {
+    { L"Autodesk FBX (*.fbx)",         L"*.fbx" },
+    { L"ActorX mesh (*.psk)",          L"*.psk" },
+  };
 
   std::wstring startDir;
   app.CSetting.getData(SETTING_LAST_EXPORT, startDir, L"");
@@ -2903,18 +2999,25 @@ void ExportSelectedModel(HWND hWnd, kukdh1::Tree *pTree) {
                        : isCollision ? L"Export Collision Mesh"
                                      : L"Export Model";
 
+  const COMDLG_FILTERSPEC *filters = meshFilters;
+  UINT nFilters = ARRAYSIZE(meshFilters);
+  if (isSkinned)      { filters = charFilters; nFilters = ARRAYSIZE(charFilters); }
+  else if (fbxOnly)   { filters = fbxFilters;  nFilters = ARRAYSIZE(fbxFilters);  }
+
   UINT filterIndex = 1;
   std::wstring outPath;
   if (!kukdh1::SaveFileDialog(hWnd, title,
                               (wBase + (fbxOnly ? L".fbx" : L".obj")).c_str(),
-                              fbxOnly ? fbxFilters : meshFilters,
-                              fbxOnly ? ARRAYSIZE(fbxFilters) : ARRAYSIZE(meshFilters),
+                              filters, nFilters,
                               startDir.c_str(), filterIndex, outPath))
     return;
 
-  kukdh1::PamExportFormat fmt = (fbxOnly || filterIndex == 2)
-                                  ? kukdh1::PAM_EXPORT_FBX
-                                  : kukdh1::PAM_EXPORT_OBJ;
+  kukdh1::PamExportFormat fmt;
+  if (isSkinned)     fmt = (filterIndex == 2) ? kukdh1::PAM_EXPORT_PSK
+                                              : kukdh1::PAM_EXPORT_FBX;
+  else if (fbxOnly)  fmt = kukdh1::PAM_EXPORT_FBX;
+  else               fmt = (filterIndex == 2) ? kukdh1::PAM_EXPORT_FBX
+                                              : kukdh1::PAM_EXPORT_OBJ;
 
   // The dialog does not always append the extension when the name already
   // contains a dot, so make sure it matches the chosen type.

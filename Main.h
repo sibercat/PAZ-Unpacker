@@ -21,6 +21,7 @@
 #include "Tree.h"
 #include "MetaFile.h"
 #include "PamExport.h"
+#include "PskExport.h"
 #include "PamModel.h"
 #include "PamRender.h"
 #include "PazFile.h"

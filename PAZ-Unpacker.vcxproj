@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -100,6 +100,7 @@
     <ClCompile Include="PabSkeleton.cpp" />
     <ClCompile Include="PacModel.cpp" />
     <ClCompile Include="PamExport.cpp" />
+    <ClCompile Include="PskExport.cpp" />
     <ClCompile Include="PamModel.cpp" />
     <ClCompile Include="PamRender.cpp" />
     <ClCompile Include="PazFile.cpp" />
@@ -117,6 +118,7 @@
     <ClInclude Include="PabSkeleton.h" />
     <ClInclude Include="PacModel.h" />
     <ClInclude Include="PamExport.h" />
+    <ClInclude Include="PskExport.h" />
     <ClInclude Include="PamModel.h" />
     <ClInclude Include="PamRender.h" />
     <ClInclude Include="PazFile.h" />

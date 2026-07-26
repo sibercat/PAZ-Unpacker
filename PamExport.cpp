@@ -1531,6 +1531,7 @@ namespace kukdh1 {
   const wchar_t *ExportExtension(PamExportFormat format) {
     switch (format) {
       case PAM_EXPORT_FBX: return L"fbx";
+      case PAM_EXPORT_PSK: return L"psk";
       case PAM_EXPORT_OBJ:
       default:             return L"obj";
     }
