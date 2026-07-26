@@ -2514,6 +2514,129 @@ static kukdh1::Tree *FindSkeletonFor(const std::string &sPacPath) {
   return best;
 }
 
+// Every .paa clip belonging to the same character as a mesh, found by the same
+// prefix convention FindSkeletonFor uses. Clips live under character/motion/
+// rather than character/model/, so only the file name is matched.
+//
+// Counts vary enormously -- a summon has a couple of dozen, a playable class
+// has a few thousand -- which is why the caller confirms before writing them.
+static std::vector<kukdh1::Tree *> FindAnimationsFor(const std::string &sPacPath,
+                                                     uint64_t &ullTotalBytes) {
+  std::vector<kukdh1::Tree *> out;
+  ullTotalBytes = 0;
+
+  size_t slash = sPacPath.rfind('/');
+  std::string base = (slash != std::string::npos) ? sPacPath.substr(slash + 1) : sPacPath;
+  size_t us = base.find('_');
+  if (us == std::string::npos || us == 0) return out;
+
+  std::string prefix = base.substr(0, us);
+  std::transform(prefix.begin(), prefix.end(), prefix.begin(),
+                 [](unsigned char c) { return (char)::tolower(c); });
+
+  for (kukdh1::Tree *n : GetCachedFileNodes()) {
+    const std::string &p = n->GetFileInfo().sFullPath;
+    if (p.size() < 5 || p.compare(p.size() - 4, 4, ".paa") != 0) continue;
+    size_t s = p.rfind('/');
+    std::string b = (s != std::string::npos) ? p.substr(s + 1) : p;
+    std::transform(b.begin(), b.end(), b.begin(),
+                   [](unsigned char c) { return (char)::tolower(c); });
+    if (b.compare(0, prefix.size(), prefix) != 0) continue;
+    if (b.size() <= prefix.size() || b[prefix.size()] != '_') continue;
+    out.push_back(n);
+    ullTotalBytes += n->GetFileInfo().uiOriginalSize;
+  }
+  return out;
+}
+
+// Writes every animation clip belonging to a character next to its exported
+// mesh, one FBX per clip in a "<mesh>_animations" folder. Returns a sentence
+// to append to the export report; never fails the mesh export, since the mesh
+// is already on disk by this point.
+//
+// Above kAnimConfirmLimit clips the user is asked first: a playable class has
+// a few thousand, which is several hundred megabytes and not what someone
+// exporting one creature expects.
+static std::wstring ExportCharacterAnimations(const std::string &sPacPath,
+                                              const kukdh1::PabSkeleton &skel,
+                                              const std::wstring &wsMeshPath,
+                                              kukdh1::Crypt &cipher) {
+  constexpr size_t kAnimConfirmLimit = 25;
+
+  uint64_t ullBytes = 0;
+  std::vector<kukdh1::Tree *> clips = FindAnimationsFor(sPacPath, ullBytes);
+  if (clips.empty()) return L"\r\n\r\nNo animation clips were found for this character.";
+
+  if (clips.size() > kAnimConfirmLimit) {
+    WCHAR ask[512];
+    swprintf_s(ask,
+      L"This character has %zu animation clips (%.1f MB in the archive).\r\n\r\n"
+      L"Export them all as FBX next to the mesh? This writes %zu files and "
+      L"may take a while.\r\n\r\n"
+      L"Choose No to export just the mesh and textures.",
+      clips.size(), (double)ullBytes / (1024.0 * 1024.0), clips.size());
+    if (MessageBoxW(nullptr, ask, L"Export Animations?",
+                    MB_YESNO | MB_ICONQUESTION) != IDYES) {
+      WCHAR skipped[160];
+      swprintf_s(skipped, L"\r\n\r\n%zu animation clips were skipped.", clips.size());
+      return skipped;
+    }
+  }
+
+  std::filesystem::path meshPath(wsMeshPath);
+  std::wstring dir = (meshPath.parent_path() / (meshPath.stem().wstring() + L"_animations")).wstring();
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  if (ec) return L"\r\n\r\nThe animation folder could not be created.";
+
+  WCHAR tempDir[MAX_PATH];
+  GetTempPath(MAX_PATH, tempDir);
+  const std::wstring clipTemp = std::wstring(tempDir) + L"paz_export_clip.paa";
+
+  size_t written = 0, failed = 0, mismatched = 0;
+  for (size_t i = 0; i < clips.size(); i++) {
+    if (i % 8 == 0) {
+      WCHAR st[96];
+      swprintf_s(st, L"Writing animation %zu of %zu...", i + 1, clips.size());
+      SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)st);
+    }
+
+    const kukdh1::FileInfo &ci = clips[i]->GetFileInfo();
+    kukdh1::PaaAnimation anim;
+    if (!ExtractFile(clipTemp, ci, cipher) || !anim.Load(clipTemp) || anim.IsEmpty()) {
+      DeleteFile(clipTemp.c_str());
+      failed++;
+      continue;
+    }
+    DeleteFile(clipTemp.c_str());
+
+    size_t slash = ci.sFullPath.rfind('/');
+    std::string name = (slash != std::string::npos)
+      ? ci.sFullPath.substr(slash + 1) : ci.sFullPath;
+    if (name.size() > 4) name.resize(name.size() - 4);      // drop ".paa"
+    std::wstring wName;
+    kukdh1::ConvertWidechar(name, wName);
+
+    std::wstring err;
+    if (kukdh1::ExportAnimation(skel, anim, dir + L"\\" + wName + L".fbx", err))
+      written++;
+    else
+      mismatched++;   // clip drives a different rig; not an export failure
+  }
+
+  WCHAR buf[320];
+  swprintf_s(buf, L"\r\n\r\nAnimations: %zu of %zu clips written to \"%s\".",
+             written, clips.size(), std::filesystem::path(dir).filename().c_str());
+  std::wstring out = buf;
+  if (mismatched || failed) {
+    WCHAR extra[192];
+    swprintf_s(extra, L"\r\n%zu did not match this skeleton, %zu could not be read.",
+               mismatched, failed);
+    out += extra;
+  }
+  return out;
+}
+
 DWORD WINAPI ExportThread(LPVOID arg) {
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
   std::unique_ptr<ExportParams> p(reinterpret_cast<ExportParams *>(arg));
@@ -2631,6 +2754,10 @@ DWORD WINAPI ExportThread(LPVOID arg) {
             mesh.TotalVertices(), mesh.TotalTriangles(),
             mesh.vSubmeshes.size(), skel.vBones.size(), nDiffuse, nNormal);
           msg = buf;
+
+          // The clips are separate files in the archive, so a mesh on its own
+          // arrives in an engine with nothing to play. Write them alongside it.
+          msg += ExportCharacterAnimations(info.sFullPath, skel, p->wsPath, cipher);
         } else {
           msg = err;
         }
