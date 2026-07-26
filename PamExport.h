@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "PaaAnimation.h"
 #include "PabSkeleton.h"
 #include "PacModel.h"
 #include "PamModel.h"
@@ -37,6 +38,13 @@ namespace kukdh1 {
   // node hierarchy. Returns false on any I/O failure.
   bool ExportSkeleton(const PabSkeleton &skel, const std::wstring &wsPath,
                       std::wstring &wsError);
+
+  // Writes a .pab skeleton with a .paa clip applied: the bone hierarchy plus
+  // FBX animation curves. Tracks are matched to bones by id, and a clip that
+  // drives none of this skeleton's bones is refused rather than exported as a
+  // silent rest pose. FBX only.
+  bool ExportAnimation(const PabSkeleton &skel, const PaaAnimation &anim,
+                       const std::wstring &wsPath, std::wstring &wsError);
 
   // Writes a .pac character mesh bound to its .pab skeleton: geometry plus a
   // bone hierarchy, skin clusters and a bind pose. The mesh's bone palette is

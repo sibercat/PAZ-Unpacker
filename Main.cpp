@@ -1030,7 +1030,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
 
             // Export is offered on .pam models, .pac character meshes and
             // .pab skeletons only.
-            bool isPam = false, isPab = false, isPac = false;
+            bool isPam = false, isPab = false, isPac = false, isPaa = false;
             if (pNode->GetType() == kukdh1::Tree::TREE_TYPE_FILE) {
               const std::string &fp = pNode->GetFileInfo().sFullPath;
               if (fp.size() >= 4) {
@@ -1040,6 +1040,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
                 isPam = (e == ".pam");
                 isPab = (e == ".pab");
                 isPac = (e == ".pac");
+                isPaa = (e == ".paa");
               }
             }
 
@@ -1054,6 +1055,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
             else if (isPac)
               AppendMenuW(hMenu, MF_STRING | (app.bBusy ? MF_GRAYED : 0), 2,
                           L"Export Character Mesh + Skeleton (FBX)...");
+            else if (isPaa)
+              AppendMenuW(hMenu, MF_STRING | (app.bBusy ? MF_GRAYED : 0), 2,
+                          L"Export Animation + Skeleton (FBX)...");
 
             int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, nullptr);
             DestroyMenu(hMenu);
@@ -2462,10 +2466,52 @@ DWORD WINAPI ExportThread(LPVOID arg) {
                           lowerPath.compare(lowerPath.size() - 4, 4, ".pab") == 0;
   const bool isSkinned  = lowerPath.size() >= 4 &&
                           lowerPath.compare(lowerPath.size() - 4, 4, ".pac") == 0;
+  const bool isAnim     = lowerPath.size() >= 4 &&
+                          lowerPath.compare(lowerPath.size() - 4, 4, ".paa") == 0;
 
   kukdh1::CryptICE cipher(ICE_KEY, ICE_KEY_LEN);
   if (!ExtractFile(tempPath, info, cipher)) {
     msg = L"Could not extract the model from the archive.";
+  }
+  else if (isAnim) {
+    SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Locating skeleton...");
+    kukdh1::PaaAnimation anim;
+    bool loaded = anim.Load(tempPath);
+    DeleteFile(tempPath.c_str());
+
+    if (!loaded || anim.IsEmpty()) {
+      msg = L"The animation clip could not be parsed.";
+    }
+    else if (kukdh1::Tree *pSkelNode = FindSkeletonFor(info.sFullPath)) {
+      const kukdh1::FileInfo &sinfo = pSkelNode->GetFileInfo();
+      std::wstring skelTemp = std::wstring(tempDir) + L"paz_export_skel.pab";
+      kukdh1::PabSkeleton skel;
+      bool sok = ExtractFile(skelTemp, sinfo, cipher) && skel.Load(skelTemp);
+      DeleteFile(skelTemp.c_str());
+
+      if (!sok || skel.IsEmpty()) {
+        msg = L"Found a skeleton for this clip but could not parse it.";
+      }
+      else {
+        SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Writing animation...");
+        std::wstring err;
+        if (kukdh1::ExportAnimation(skel, anim, p->wsPath, err)) {
+          ok = true;
+          WCHAR buf[320];
+          swprintf_s(buf,
+            L"Exported %zu tracks, %zu keys, %.2f s, on %zu bones.",
+            anim.vTracks.size(), anim.TotalKeys(),
+            anim.DurationMs() / 1000.0, skel.vBones.size());
+          msg = buf;
+        } else {
+          msg = err;
+        }
+      }
+    }
+    else {
+      msg = L"No matching .pab skeleton was found in the archive for this "
+            L"clip, so it cannot be applied to a rig.";
+    }
   }
   else if (isSkinned) {
     SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Locating skeleton...");
@@ -2600,10 +2646,11 @@ void ExportSelectedModel(HWND hWnd, kukdh1::Tree *pTree) {
 
   const bool isSkeleton = (ext == ".pab");
   const bool isSkinned  = (ext == ".pac");
-  if (ext != ".pam" && !isSkeleton && !isSkinned) {
+  const bool isAnim     = (ext == ".paa");
+  if (ext != ".pam" && !isSkeleton && !isSkinned && !isAnim) {
     MessageBoxW(hWnd,
-      L"Only .pam models, .pac character meshes and .pab skeletons can be "
-      L"exported.\r\n\r\nSelect one in the tree and try again.",
+      L"Only .pam models, .pac character meshes, .pab skeletons and .paa "
+      L"animations can be exported.\r\n\r\nSelect one in the tree and try again.",
       L"Export Model", MB_OK | MB_ICONINFORMATION);
     return;
   }
@@ -2615,8 +2662,8 @@ void ExportSelectedModel(HWND hWnd, kukdh1::Tree *pTree) {
   std::wstring wBase;
   kukdh1::ConvertWidechar(base, wBase);
 
-  // Neither a bone hierarchy nor a skin survives OBJ, so those offer FBX only.
-  const bool fbxOnly = isSkeleton || isSkinned;
+  // Nothing with a node hierarchy survives OBJ, so those offer FBX only.
+  const bool fbxOnly = isSkeleton || isSkinned || isAnim;
   const COMDLG_FILTERSPEC meshFilters[] = {
     { L"Wavefront OBJ (*.obj)",  L"*.obj" },
     { L"Autodesk FBX (*.fbx)",   L"*.fbx" },
@@ -2630,6 +2677,7 @@ void ExportSelectedModel(HWND hWnd, kukdh1::Tree *pTree) {
 
   const wchar_t *title = isSkeleton ? L"Export Skeleton"
                        : isSkinned  ? L"Export Character Mesh"
+                       : isAnim     ? L"Export Animation"
                                     : L"Export Model";
 
   UINT filterIndex = 1;
