@@ -20,8 +20,8 @@ namespace kukdh1 {
   //    0x05  uint8     version: 3 (player) or 4 (monster) — same layout
   //    0x06  uint8[10] 00 01 02 03 04 05 06 07 08 09 (constant descriptor)
   //    0x10  uint16    bone count
-  //    0x12  uint32    skeleton id — the same value appears in the .paa
-  //                    animation clips that drive this rig
+  //    0x12  uint32    the FIRST bone's id — see uiBoneId below; the ids run
+  //                    one record ahead of the bones they name
   //
   //  Bone record @0x16, one per bone, in hierarchy order (a parent always
   //  precedes its children, so a single forward pass can compose transforms)
@@ -62,13 +62,16 @@ namespace kukdh1 {
     // Stable per-bone id. A .pac mesh does not store global bone indices --
     // its per-file palette lists these ids, and a vertex's 4 bone indices are
     // offsets into that palette. Resolving a skin therefore means matching
-    // palette entries against this field.
+    // palette entries against this field. A .paa animation track names its
+    // target bone the same way.
     //
-    // Sits at payload+302, so its last two bytes fall in what would otherwise
-    // be the inter-record gap. The final bone in a file is stored two bytes
-    // short, so its id is unavailable; bHasId says whether it was read.
+    // The ids are stored one record AHEAD of the bone they belong to: the
+    // header field at 0x12 is bone 0's id, and the four bytes at payload+302
+    // of record i are bone i+1's. That is also why a record's payload appears
+    // to overrun by two bytes into the inter-record gap, and why the last
+    // record is two bytes short -- there is no further bone to name, so the
+    // file simply stops.
     uint32_t    uiBoneId;
-    bool        bHasId;
   };
 
   class PabSkeleton {
@@ -76,7 +79,7 @@ namespace kukdh1 {
       std::vector<PabBone> vBones;
 
       uint32_t uiVersion;
-      uint32_t uiSkeletonId;
+      uint32_t uiFirstBoneId;   // header field at 0x12; vBones[0].uiBoneId
 
       PabSkeleton();
 

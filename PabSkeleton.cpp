@@ -20,7 +20,8 @@ namespace {
   constexpr size_t OFF_QUAT   = 0x110;
   constexpr size_t OFF_TRANS  = 0x120;
   // Runs to payload+306, i.e. two bytes past BONE_PAYLOAD, which is why the
-  // gap between records is two bytes wider than the payload itself.
+  // gap between records is two bytes wider than the payload itself. The value
+  // names the NEXT bone, not this one -- see PabBone::uiBoneId.
   constexpr size_t OFF_BONEID = 0x12E;
 
   // Bytes between the end of one payload and the start of the next record:
@@ -78,12 +79,12 @@ namespace {
 
 }  // namespace
 
-PabSkeleton::PabSkeleton() : uiVersion(0), uiSkeletonId(0) {}
+PabSkeleton::PabSkeleton() : uiVersion(0), uiFirstBoneId(0) {}
 
 void PabSkeleton::Clear() {
   vBones.clear();
-  uiVersion    = 0;
-  uiSkeletonId = 0;
+  uiVersion     = 0;
+  uiFirstBoneId = 0;
 }
 
 bool PabSkeleton::IsEmpty() const {
@@ -117,7 +118,7 @@ bool PabSkeleton::LoadFromMemory(const uint8_t *pData, size_t stSize) {
   if (uiVersion != 3 && uiVersion != 4) return false;
 
   uint32_t uiBoneCount = Read<uint16_t>(pData + 0x10);
-  uiSkeletonId         = Read<uint32_t>(pData + 0x12);
+  uiFirstBoneId        = Read<uint32_t>(pData + 0x12);
   if (uiBoneCount == 0) return false;
 
   // Guard against a corrupt count demanding an implausible allocation.
@@ -145,8 +146,11 @@ bool PabSkeleton::LoadFromMemory(const uint8_t *pData, size_t stSize) {
     for (int k = 0; k < 4; k++) b.fQuat[k]  = Read<float>(pData + payload + OFF_QUAT  + 4 * k);
     for (int k = 0; k < 3; k++) b.fTrans[k] = Read<float>(pData + payload + OFF_TRANS + 4 * k);
 
-    b.bHasId  = (payload + OFF_BONEID + 4 <= stSize);
-    b.uiBoneId = b.bHasId ? Read<uint32_t>(pData + payload + OFF_BONEID) : 0;
+    // This names the NEXT bone; it is shifted into place after the loop. The
+    // last record stops two bytes short of it, and that value would belong to
+    // a bone that does not exist, so reading nothing there is correct.
+    b.uiBoneId = (payload + OFF_BONEID + 4 <= stSize)
+               ? Read<uint32_t>(pData + payload + OFF_BONEID) : 0;
 
     // A non-normal quaternion means the offsets have drifted; that is the
     // cheapest reliable check that this record was read at the right place.
@@ -191,12 +195,23 @@ bool PabSkeleton::LoadFromMemory(const uint8_t *pData, size_t stSize) {
 
   if (off != stSize)               { Clear(); return false; }
   if (vBones.size() != uiBoneCount) { Clear(); return false; }
+
+  // Shift the ids onto the bones they actually name. Each record carries the
+  // following bone's id, so bone 0 takes the header field and every other
+  // bone takes the value read from the record before it. The value trailing
+  // the last record -- if the file even reaches it -- is dropped.
+  uint32_t carry = uiFirstBoneId;
+  for (auto &b : vBones) {
+    const uint32_t next = b.uiBoneId;
+    b.uiBoneId = carry;
+    carry      = next;
+  }
   return true;
 }
 
 int PabSkeleton::FindBoneById(uint32_t uiId) const {
   for (size_t i = 0; i < vBones.size(); i++)
-    if (vBones[i].bHasId && vBones[i].uiBoneId == uiId) return (int)i;
+    if (vBones[i].uiBoneId == uiId) return (int)i;
   return -1;
 }
 
