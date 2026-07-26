@@ -226,7 +226,12 @@ void PabSkeleton::ComputeWorldMatrices(std::vector<float> &vOut16) const {
     const float n = std::sqrt(x*x + y*y + z*z + w*w);
     if (n > 0.0f) { x /= n; y /= n; z /= n; w /= n; }
 
-    // Local basis, scaled. Row r holds the image of axis r.
+    // R is the quaternion's rotation for column vectors (v' = R*v), the same
+    // form ComputeWorldPositions uses. FBX lays a matrix out for ROW vectors
+    // instead -- basis vectors as rows, translation at 12..14 -- so row r must
+    // hold the image of axis r, which is column r of R. Transposing here is
+    // what keeps this in step with ComputeWorldPositions; dropping it makes
+    // every rotated bone carry its own inverse.
     const float R[9] = {
       1 - 2*(y*y + z*z),     2*(x*y - z*w),     2*(x*z + y*w),
           2*(x*y + z*w), 1 - 2*(x*x + z*z),     2*(y*z - x*w),
@@ -235,7 +240,7 @@ void PabSkeleton::ComputeWorldMatrices(std::vector<float> &vOut16) const {
     float L[16] = {};
     for (int r = 0; r < 3; r++)
       for (int c = 0; c < 3; c++)
-        L[r * 4 + c] = R[r * 3 + c] * b.fScale[r];
+        L[r * 4 + c] = R[c * 3 + r] * b.fScale[r];
     L[12] = b.fTrans[0]; L[13] = b.fTrans[1]; L[14] = b.fTrans[2]; L[15] = 1.0f;
 
     float *W = &vOut16[i * 16];
