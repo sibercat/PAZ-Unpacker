@@ -59,6 +59,45 @@ are supported.
 
 Exports are verified to import into **Blender**, **3ds Max** and **Unreal Engine 5**.
 
+### Characters: skeletons, skinning and animation
+
+The rest of the `PAR ` family was reverse engineered too, so a character comes
+out complete rather than as a static pose:
+
+| File | What it holds | Exports as |
+|---|---|---|
+| `.pac` | Skinned character mesh, with a bone palette | FBX (skinned) or ActorX `.psk` |
+| `.pab` | Skeleton — bone hierarchy and rest pose | FBX |
+| `.paa` | One animation clip | FBX, or a shared `.psa` |
+| `.pcm` | Collision hull | OBJ or FBX |
+
+Exporting a `.pac` also pulls its textures out of the archive, and offers to
+write the character's animation clips alongside it — a creature has a couple of
+dozen, a playable class several thousand, so it asks first and tells you how
+many.
+
+#### Getting a character into Unreal Engine 5
+
+The mesh imports into UE5 directly from FBX. Animation is the awkward part:
+UE will not build an `AnimSequence` from an animation-only FBX. The route that
+works is the one the modding community already uses — via 3ds Max, letting
+Autodesk's own FBX exporter write the file:
+
+1. Export the character as **ActorX mesh (`*.psk`)** from the save dialog.
+   Every clip is written into a single `.psa` beside it.
+2. In 3ds Max, import the `.psk` and then the `.psa` with **Gildor's ActorX
+   Importer** ([gildor.org/projects/unactorx](http://www.gildor.org/projects/unactorx)).
+3. Export from Max as FBX.
+4. Import that FBX into UE5.
+
+Verified end to end on a 91-bone creature: 53,013 verts, a Skin modifier bound
+to every bone, and **28 of 28 animation clips** arriving in UE5 as
+`AnimSequence` assets with their original timing intact.
+
+`.psk`/`.psa` is worth using for Max and Blender generally — the format is
+unambiguous where FBX is not, and Max reads it as a real bone hierarchy rather
+than a pile of dummy helpers.
+
 ## Requirements
 
 - Windows 10 or 11 (x64)
@@ -97,3 +136,7 @@ Exports are verified to import into **Blender**, **3ds Max** and **Unreal Engine
 Modifications made in this fork are licensed under the [MIT License](LICENSE).  
 The original source code was published without a license — all original rights belong to **kukdh1**.  
 See [CREDITS](CREDITS) for full attribution.
+
+The **ActorX Importer** referenced above is not part of this project. It is
+© 2009-2022 **Konstantin Nosov (Gildor)** and is available from
+[gildor.org/projects/unactorx](http://www.gildor.org/projects/unactorx).
