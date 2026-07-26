@@ -19,6 +19,25 @@ DWORD   WINAPI   CacheLoadThread(LPVOID arg);
 DWORD   WINAPI   ExtractThread(LPVOID arg);
 DWORD   WINAPI   AddThread(LPVOID arg);
 DWORD   WINAPI   CheckUpdateThread(LPVOID arg);
+
+// ── Update check plumbing ────────────────────────────────────────────────────
+// Two callers with different reporting rules share one thread:
+//   silent  -- fired once at startup; only ever lights up the footer link
+//   loud    -- the Help menu item; reports every outcome in a message box
+// The request and the result are each heap-allocated and owned by exactly one
+// side, so a startup check and a menu check may safely overlap.
+struct UpdateCheckReq {
+  HWND hWnd;
+  bool bSilent;
+};
+
+struct UpdateResult {
+  int          nCode;    // 1 = newer available, 0 = up to date, -1 = check failed
+  bool         bSilent;
+  std::wstring wsTag;    // release tag, only meaningful when nCode == 1
+};
+
+void StartUpdateCheck(HWND hWnd, bool bSilent);
 void             OpenPazFolder(HWND hWnd, const std::wstring &folderPath);
 void             ShowSettingsDialog(HWND hParent);
 void             ShowSearchWindow(HWND hParent);
@@ -154,6 +173,21 @@ LRESULT CALLBACK DarkStatusBarProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
     SetBkMode(hdc, TRANSPARENT);
     if (app.hFont) SelectObject(hdc, app.hFont);
 
+    // The update notice is right-aligned inside the last part. Measure it up
+    // front so the part's own text can be clipped short of it rather than
+    // drawing underneath.
+    std::wstring wsNotice;
+    int nNoticeW = 0;
+    if (app.bUpdateAvailable) {
+      // Up arrow written as \u2191 rather than a literal: this file is UTF-8
+      // without a BOM and the build does not pass /utf-8.
+      wsNotice = L"\u2191 Update available: " + app.wsUpdateTag;
+      SIZE sz = {};
+      GetTextExtentPoint32W(hdc, wsNotice.c_str(), (int)wsNotice.size(), &sz);
+      nNoticeW = sz.cx + 12;
+    }
+    SetRectEmpty(&app.rcUpdateLink);
+
     // Draw each part's text
     int nParts = (int)SendMessage(hWnd, SB_GETPARTS, 0, 0);
     for (int i = 0; i < nParts; i++) {
@@ -162,12 +196,48 @@ LRESULT CALLBACK DarkStatusBarProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
       wchar_t buf[256] = {};
       SendMessage(hWnd, SB_GETTEXT, i, (LPARAM)buf);
       InflateRect(&partRc, -2, 0);
+
+      if (i == nParts - 1 && nNoticeW > 0) {
+        // Keep clear of the size grip, which overlays the last part.
+        RECT linkRc = partRc;
+        linkRc.right -= GetSystemMetrics(SM_CXVSCROLL);
+        linkRc.left   = (std::max)(partRc.left, linkRc.right - nNoticeW);
+        if (linkRc.right > linkRc.left) {
+          partRc.right = linkRc.left;
+          app.rcUpdateLink = linkRc;
+          SetTextColor(hdc, CLR_DARK_LINK);
+          DrawTextW(hdc, wsNotice.c_str(), -1, &linkRc,
+                    DT_SINGLELINE | DT_VCENTER | DT_RIGHT);
+          SetTextColor(hdc, CLR_DARK_TEXT2);
+        }
+      }
+
       DrawTextW(hdc, buf, -1, &partRc, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
     }
     EndPaint(hWnd, &ps);
     return 0;
   }
   if (msg == WM_ERASEBKGND) return 1;
+
+  // Footer update notice behaves like a link: hand cursor, opens the releases
+  // page. rcUpdateLink is empty unless the notice is actually on screen.
+  if (msg == WM_LBUTTONUP && !IsRectEmpty(&app.rcUpdateLink)) {
+    POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+    if (PtInRect(&app.rcUpdateLink, pt)) {
+      ShellExecuteW(hWnd, L"open", APP_RELEASES_URL, nullptr, nullptr, SW_SHOWNORMAL);
+      return 0;
+    }
+  }
+  if (msg == WM_SETCURSOR && !IsRectEmpty(&app.rcUpdateLink)) {
+    POINT pt;
+    GetCursorPos(&pt);
+    ScreenToClient(hWnd, &pt);
+    if (PtInRect(&app.rcUpdateLink, pt)) {
+      SetCursor(LoadCursor(nullptr, IDC_HAND));
+      return TRUE;
+    }
+  }
+
   return CallWindowProc(g_fnOrigStatusBarProc, hWnd, msg, wParam, lParam);
 }
 
@@ -518,6 +588,11 @@ BOOL Cls_OnCreate(HWND hWnd, LPCREATESTRUCT lpCreateStruct) {
     SetMenu(hWnd, hMenu);
   }
 
+  // ── Background update check ──────────────────────────────────────────────
+  // Silent: a newer release adds a clickable notice to the footer, and every
+  // other outcome (offline, rate-limited, already current) is ignored.
+  StartUpdateCheck(hWnd, true);
+
   return TRUE;
 }
 
@@ -674,7 +749,7 @@ void Cls_OnCommand(HWND hWnd, int id, HWND hwndCtl, UINT codeNotify) {
       HMENU hHelp = GetSubMenu(hBar, 4);
       EnableMenuItem(hHelp, ID_MENU_HELP_CHECK_UPDATE, MF_BYCOMMAND | MF_GRAYED);
       DrawMenuBar(hWnd);
-      CreateThread(nullptr, 0, CheckUpdateThread, (LPVOID)hWnd, 0, nullptr);
+      StartUpdateCheck(hWnd, false);
     }
     break;
 
@@ -752,26 +827,38 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam)
 
     case WM_APP_UPDATE_RESULT:
       {
-        // Re-enable the menu item (Help is index 4 — File/Cache/Search/Settings/Help)
-        HMENU hBar  = GetMenu(hWnd);
-        HMENU hHelp = GetSubMenu(hBar, 4);
-        EnableMenuItem(hHelp, ID_MENU_HELP_CHECK_UPDATE, MF_BYCOMMAND | MF_ENABLED);
-        DrawMenuBar(hWnd);
+        // lParam = heap UpdateResult from CheckUpdateThread; we own it now.
+        std::unique_ptr<UpdateResult> res((UpdateResult *)(LPARAM)lParam);
+        if (!res) return 0;
 
-        int result = (int)(INT_PTR)wParam;
-        if (result == 1) {
-          // lParam = pointer to heap-allocated latest version string; caller frees
-          wchar_t *latestVer = (wchar_t *)(LPARAM)lParam;
+        // A newer release always lights up the footer, however it was found.
+        if (res->nCode == 1) {
+          app.bUpdateAvailable = true;
+          app.wsUpdateTag      = res->wsTag;
+          InvalidateRect(app.hStatusBar, nullptr, TRUE);
+        }
+
+        // The startup check reports nothing else: no internet, a rate-limited
+        // API or an up-to-date build must not interrupt the user.
+        if (res->bSilent) return 0;
+
+        // Re-enable the menu item (Help is index 4 — File/Cache/Search/Settings/Help)
+        if (HMENU hBar = GetMenu(hWnd)) {
+          EnableMenuItem(GetSubMenu(hBar, 4), ID_MENU_HELP_CHECK_UPDATE,
+                         MF_BYCOMMAND | MF_ENABLED);
+          DrawMenuBar(hWnd);
+        }
+
+        if (res->nCode == 1) {
           wchar_t msg[256];
           swprintf_s(msg,
             L"A new version is available!\r\n\r\n"
             L"Current:  v" APP_VERSION L"\r\n"
             L"Latest:   %s\r\n\r\n"
             L"Visit https://github.com/sibercat/PAZ-Unpacker/releases to download.",
-            latestVer);
-          delete[] latestVer;
+            res->wsTag.c_str());
           MessageBoxW(hWnd, msg, L"Update Available", MB_OK | MB_ICONINFORMATION);
-        } else if (result == 0) {
+        } else if (res->nCode == 0) {
           MessageBoxW(hWnd,
             L"You are running the latest version (v" APP_VERSION L").",
             L"Up to Date", MB_OK | MB_ICONINFORMATION);
@@ -1689,18 +1776,35 @@ void ShowSearchWindow(HWND hParent) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Update check thread
 // Calls GitHub releases API, compares tag_name with APP_VERSION.
-// Posts WM_APP_UPDATE_RESULT: wParam = 1 (newer), 0 (up-to-date), -1 (error).
-// On wParam==1, lParam = new wchar_t[] with tag string (caller must delete[]).
+// arg = heap UpdateCheckReq, owned by this thread.
+// Posts WM_APP_UPDATE_RESULT with lParam = heap UpdateResult, owned by the
+// window proc. wParam mirrors the result code for convenience.
 // ─────────────────────────────────────────────────────────────────────────────
+static void PostUpdateResult(HWND hWnd, bool bSilent, int nCode,
+                             const std::wstring &wsTag = std::wstring()) {
+  auto *res = new UpdateResult{ nCode, bSilent, wsTag };
+  if (!PostMessage(hWnd, WM_APP_UPDATE_RESULT, (WPARAM)(INT_PTR)nCode, (LPARAM)res))
+    delete res;   // window already gone; nobody will take ownership
+}
+
+void StartUpdateCheck(HWND hWnd, bool bSilent) {
+  auto *req = new UpdateCheckReq{ hWnd, bSilent };
+  HANDLE hThread = CreateThread(nullptr, 0, CheckUpdateThread, req, 0, nullptr);
+  if (hThread) CloseHandle(hThread);
+  else         delete req;
+}
+
 DWORD WINAPI CheckUpdateThread(LPVOID arg) {
-  HWND hWnd = (HWND)arg;
+  std::unique_ptr<UpdateCheckReq> req((UpdateCheckReq *)arg);
+  HWND hWnd    = req->hWnd;
+  bool bSilent = req->bSilent;
 
   HINTERNET hSession = WinHttpOpen(L"PAZ-Unpacker/" APP_VERSION,
                                    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                    WINHTTP_NO_PROXY_NAME,
                                    WINHTTP_NO_PROXY_BYPASS, 0);
   if (!hSession) {
-    PostMessage(hWnd, WM_APP_UPDATE_RESULT, (WPARAM)(INT_PTR)-1, 0);
+    PostUpdateResult(hWnd, bSilent, -1);
     return 0;
   }
 
@@ -1708,7 +1812,7 @@ DWORD WINAPI CheckUpdateThread(LPVOID arg) {
                                       INTERNET_DEFAULT_HTTPS_PORT, 0);
   if (!hConnect) {
     WinHttpCloseHandle(hSession);
-    PostMessage(hWnd, WM_APP_UPDATE_RESULT, (WPARAM)(INT_PTR)-1, 0);
+    PostUpdateResult(hWnd, bSilent, -1);
     return 0;
   }
 
@@ -1719,7 +1823,7 @@ DWORD WINAPI CheckUpdateThread(LPVOID arg) {
   if (!hRequest) {
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
-    PostMessage(hWnd, WM_APP_UPDATE_RESULT, (WPARAM)(INT_PTR)-1, 0);
+    PostUpdateResult(hWnd, bSilent, -1);
     return 0;
   }
 
@@ -1732,7 +1836,7 @@ DWORD WINAPI CheckUpdateThread(LPVOID arg) {
     WinHttpCloseHandle(hRequest);
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
-    PostMessage(hWnd, WM_APP_UPDATE_RESULT, (WPARAM)(INT_PTR)-1, 0);
+    PostUpdateResult(hWnd, bSilent, -1);
     return 0;
   }
 
@@ -1755,13 +1859,13 @@ DWORD WINAPI CheckUpdateThread(LPVOID arg) {
   const std::string key = "\"tag_name\":\"";
   size_t pos = body.find(key);
   if (pos == std::string::npos) {
-    PostMessage(hWnd, WM_APP_UPDATE_RESULT, (WPARAM)(INT_PTR)-1, 0);
+    PostUpdateResult(hWnd, bSilent, -1);
     return 0;
   }
   pos += key.size();
   size_t end = body.find('"', pos);
   if (end == std::string::npos) {
-    PostMessage(hWnd, WM_APP_UPDATE_RESULT, (WPARAM)(INT_PTR)-1, 0);
+    PostUpdateResult(hWnd, bSilent, -1);
     return 0;
   }
 
@@ -1769,7 +1873,7 @@ DWORD WINAPI CheckUpdateThread(LPVOID arg) {
 
   // Strip leading 'v' for comparison with APP_VERSION (which has no 'v')
   std::string tagStripped = (!tagA.empty() && tagA[0] == 'v') ? tagA.substr(1) : tagA;
-  constexpr char appVerA[] = "2.4.0";  // must match APP_VERSION
+  constexpr char appVerA[] = APP_VERSION_A;
 
   // Compare numerically — a remote tag older than or equal to this build
   // (e.g. running a dev build ahead of the latest release) is "up to date".
@@ -1781,13 +1885,14 @@ DWORD WINAPI CheckUpdateThread(LPVOID arg) {
              : (rPat > lPat);
 
   if (!newer) {
-    PostMessage(hWnd, WM_APP_UPDATE_RESULT, (WPARAM)(INT_PTR)0, 0);
+    PostUpdateResult(hWnd, bSilent, 0);
   } else {
     // Convert tag to wchar_t for display
     int wlen = MultiByteToWideChar(CP_UTF8, 0, tagA.c_str(), -1, nullptr, 0);
-    wchar_t *tagW = new wchar_t[wlen];
-    MultiByteToWideChar(CP_UTF8, 0, tagA.c_str(), -1, tagW, wlen);
-    PostMessage(hWnd, WM_APP_UPDATE_RESULT, (WPARAM)(INT_PTR)1, (LPARAM)tagW);
+    std::wstring tagW(wlen > 0 ? wlen - 1 : 0, L'\0');
+    if (wlen > 1)
+      MultiByteToWideChar(CP_UTF8, 0, tagA.c_str(), -1, tagW.data(), wlen);
+    PostUpdateResult(hWnd, bSilent, 1, tagW);
   }
   return 0;
 }

@@ -7,13 +7,16 @@
 #include <windowsx.h>
 #include <CommCtrl.h>
 #include <Uxtheme.h>
+#include <shellapi.h>
 #include <wincodec.h>
 #include <memory>
 #include <mutex>
 #include <atomic>
 #include <algorithm>
+#include <string>
 #include <vector>
 
+#include "Version.h"
 #include "Helper.h"
 #include "Tree.h"
 #include "MetaFile.h"
@@ -29,12 +32,15 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "shell32.lib")
 #pragma comment(linker,"\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
-// ── Version ──────────────────────────────────────────────────────────────────
-#define APP_VERSION               L"2.4.0"
+// APP_VERSION / APP_VERSION_A come from Version.h (shared with the .rc).
+
+// Where the footer update link sends the user.
+#define APP_RELEASES_URL          L"https://github.com/sibercat/PAZ-Unpacker/releases"
 
 // ── Window layout ────────────────────────────────────────────────────────────
 #define WINDOW_MIN_WIDTH          1100
@@ -59,6 +65,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define CLR_DARK_TEXT   RGB(212, 212, 212)   // primary text
 #define CLR_DARK_TEXT2  RGB(128, 128, 128)   // secondary / dim text
 #define CLR_DARK_BORDER RGB( 63,  63,  70)   // border / separator
+#define CLR_DARK_LINK   RGB( 96, 165, 250)   // clickable text (footer update notice)
 
 // ── Font ─────────────────────────────────────────────────────────────────────
 #define FONT_SIZE                 17
@@ -150,6 +157,13 @@ typedef struct _AppData {
   float fDivideRatio;
   bool  bSplitterDrag;
 
+  // Footer update notice. rcUpdateLink is written by the status bar paint
+  // handler and read by its hit test, so the clickable area always matches
+  // exactly what was drawn (it is empty while no update is showing).
+  std::wstring wsUpdateTag;
+  bool         bUpdateAvailable;
+  RECT         rcUpdateLink;
+
   // State flags
   std::mutex mtx;
   std::atomic<bool> bBusy;
@@ -165,8 +179,12 @@ typedef struct _AppData {
     bPamShowTexture(true), bPamDirty(false),
     hBrushBg(nullptr), hBrushPanel(nullptr), hBrushInput(nullptr),
     fDivideRatio(DIVIDE_RATIO), bSplitterDrag(false),
+    bUpdateAvailable(false),
     bBusy(false)
-  { ptPamDragOrigin.x = ptPamDragOrigin.y = 0; }
+  {
+    ptPamDragOrigin.x = ptPamDragOrigin.y = 0;
+    SetRectEmpty(&rcUpdateLink);
+  }
 
 } AppData;
 

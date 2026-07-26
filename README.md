@@ -17,7 +17,7 @@ A Windows GUI tool for unpacking and extracting files from **Black Desert Online
 - **Load button** — one-click load from your saved PAZ folder path
 - **Extract button** — extracts directly to your saved path, no browse dialog if already configured
 - **Search window** — fast non-blocking search across all 800k+ files with live filtering
-- **Check for Updates** — checks GitHub releases for new versions
+- **Update notice** — checks GitHub on startup and shows a clickable link in the status bar when a newer release exists; **Help → Check for Updates** still works on demand
 - **File preview** — inline DDS/PNG/BMP texture preview panel
 - **3D model viewer** — textured preview of `.pam` models with orbit / pan / zoom
 - **Model export** — export any `.pam` to **OBJ** or **FBX**, with textures written alongside as PNG
