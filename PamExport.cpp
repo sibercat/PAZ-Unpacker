@@ -802,6 +802,145 @@ namespace kukdh1 {
       { std::vector<int32_t> r{ (int32_t)times.size() }; c.Child("KeyAttrRefCount").ArrI32(r); }
     }
 
+    // One animated property of one bone. Working these out before emitting
+    // anything keeps the Definitions counts honest and costs nothing for
+    // constant channels: a single key is a value the bone's Lcl property
+    // already carries.
+    struct AnimChan {
+      size_t   bone;
+      int      kind;                   // 0 = translation, 1 = rotation, 2 = scale
+      std::vector<int64_t> times;
+      std::vector<float>   v[3];
+    };
+
+    void BuildAnimChannels(const PabSkeleton &skel, const PaaAnimation &anim,
+                           std::vector<AnimChan> &chans) {
+      for (const auto &tr : anim.vTracks) {
+        const int b = skel.FindBoneById(tr.uiBoneId);
+        if (b < 0) continue;            // clip drives a bone this rig lacks
+
+        if (tr.vPosition.size() >= 2) {
+          AnimChan c; c.bone = (size_t)b; c.kind = 0;
+          for (const auto &k : tr.vPosition) {
+            c.times.push_back(MsToKTime(k.uiTimeMs));
+            for (int a = 0; a < 3; a++) c.v[a].push_back(k.v[a]);
+          }
+          chans.push_back(std::move(c));
+        }
+        if (tr.vRotation.size() >= 2) {
+          std::vector<double> eul;
+          QuatTrackToEuler(tr.vRotation, eul);
+          AnimChan c; c.bone = (size_t)b; c.kind = 1;
+          for (size_t k = 0; k < tr.vRotation.size(); k++) {
+            c.times.push_back(MsToKTime(tr.vRotation[k].uiTimeMs));
+            for (int a = 0; a < 3; a++) c.v[a].push_back((float)eul[k * 3 + a]);
+          }
+          chans.push_back(std::move(c));
+        }
+        if (tr.vScale.size() >= 2) {
+          AnimChan c; c.bone = (size_t)b; c.kind = 2;
+          for (const auto &k : tr.vScale) {
+            c.times.push_back(MsToKTime(k.uiTimeMs));
+            for (int a = 0; a < 3; a++) c.v[a].push_back(k.v[a]);
+          }
+          chans.push_back(std::move(c));
+        }
+      }
+    }
+
+    // Object ids for one clip. Several clips live in one file as several
+    // AnimationStacks, so each needs its own non-overlapping block.
+    struct AnimIds {
+      int64_t stack, layer, nodeBase, curveBase;
+    };
+
+    AnimIds AnimIdsFor(size_t clip, size_t maxChannels) {
+      // Generous strides so clips cannot run into one another.
+      const int64_t span = (int64_t)(maxChannels + 16) * 4;
+      AnimIds id;
+      id.stack     = 9000000  + (int64_t)clip * 2;
+      id.layer     = 9000001  + (int64_t)clip * 2;
+      id.nodeBase  = 10000000 + (int64_t)clip * span;
+      id.curveBase = 40000000 + (int64_t)clip * span * 3;
+      return id;
+    }
+
+    void EmitAnimStack(FbxNode &objs, const std::vector<AnimChan> &chans,
+                       const std::string &sTake, const AnimIds &id, int64_t stop) {
+      {
+        FbxNode &st = objs.Child("AnimationStack");
+        st.I64(id.stack);
+        st.NameClass(sTake, "AnimStack");
+        st.Str("");
+        FbxNode &p70 = st.Child("Properties70");
+        { FbxNode &p = p70.Child("P"); p.P("LocalStop", "KTime", "Time", ""); p.I64(stop); }
+        { FbxNode &p = p70.Child("P"); p.P("ReferenceStop", "KTime", "Time", ""); p.I64(stop); }
+      }
+      {
+        FbxNode &ly = objs.Child("AnimationLayer");
+        ly.I64(id.layer);
+        ly.NameClass("Base Layer", "AnimLayer");
+        ly.Str("");
+      }
+      static const char *kAxis[3] = { "d|X", "d|Y", "d|Z" };
+      for (size_t k = 0; k < chans.size(); k++) {
+        const AnimChan &c = chans[k];
+        FbxNode &cn = objs.Child("AnimationCurveNode");
+        cn.I64(id.nodeBase + (int64_t)k);
+        cn.NameClass(c.kind == 0 ? "T" : c.kind == 1 ? "R" : "S", "AnimCurveNode");
+        cn.Str("");
+        FbxNode &p70 = cn.Child("Properties70");
+        for (int a = 0; a < 3; a++) {
+          FbxNode &p = p70.Child("P");
+          p.P(kAxis[a], "Number", "", "A");
+          p.F64(c.v[a].empty() ? 0.0 : c.v[a][0]);
+        }
+        for (int a = 0; a < 3; a++)
+          EmitCurve(objs, id.curveBase + (int64_t)(k * 3 + a), c.times, c.v[a]);
+      }
+    }
+
+    void EmitAnimConnections(FbxNode &conn, const std::vector<AnimChan> &chans,
+                             const AnimIds &id, int64_t idModelBase) {
+      static const char *kProp[3] = { "Lcl Translation", "Lcl Rotation", "Lcl Scaling" };
+      static const char *kAxis[3] = { "d|X", "d|Y", "d|Z" };
+      { FbxNode &c = conn.Child("C"); c.Str("OO"); c.I64(id.stack); c.I64(0); }
+      { FbxNode &c = conn.Child("C"); c.Str("OO"); c.I64(id.layer); c.I64(id.stack); }
+      for (size_t k = 0; k < chans.size(); k++) {
+        const AnimChan &ch = chans[k];
+        { FbxNode &c = conn.Child("C"); c.Str("OO");
+          c.I64(id.nodeBase + (int64_t)k); c.I64(id.layer); }
+        // The curve node drives one property of one bone.
+        { FbxNode &c = conn.Child("C"); c.Str("OP");
+          c.I64(id.nodeBase + (int64_t)k);
+          c.I64(idModelBase + (int64_t)ch.bone);
+          c.Str(kProp[ch.kind]); }
+        for (int a = 0; a < 3; a++) {
+          FbxNode &c = conn.Child("C"); c.Str("OP");
+          c.I64(id.curveBase + (int64_t)(k * 3 + a));
+          c.I64(id.nodeBase + (int64_t)k);
+          c.Str(kAxis[a]);
+        }
+      }
+    }
+
+    // Take entries. A Takes section that names a current take without defining
+    // it leaves a reader with nothing to look up.
+    void EmitTakes(std::vector<FbxNode> &roots,
+                   const std::vector<std::string> &vTakes,
+                   const std::vector<int64_t> &vStops) {
+      FbxNode takes("Takes");
+      takes.Child("Current").Str(vTakes.empty() ? "" : vTakes[0]);
+      for (size_t i = 0; i < vTakes.size(); i++) {
+        FbxNode &tk = takes.Child("Take");
+        tk.Str(vTakes[i]);
+        tk.Child("FileName").Str(vTakes[i] + ".tak");
+        { FbxNode &t = tk.Child("LocalTime");     t.I64(0); t.I64(vStops[i]); }
+        { FbxNode &t = tk.Child("ReferenceTime"); t.I64(0); t.I64(vStops[i]); }
+      }
+      roots.push_back(std::move(takes));
+    }
+
     bool WriteSkeletonFbx(const PabSkeleton &skel, const PaaAnimation *pAnim,
                           const std::wstring &wsPath, std::wstring &wsError) {
       std::ofstream f(wsPath, std::ios::binary);
@@ -813,56 +952,16 @@ namespace kukdh1 {
       // mesh + skeleton file can reuse both blocks unchanged later.
       const int64_t idModelBase = 6000000;
       const int64_t idAttrBase  = 7000000;
-      const int64_t idAnimStack = 9000000;
-      const int64_t idAnimLayer = 9000001;
-      const int64_t idNodeBase  = 10000000;
-      const int64_t idCurveBase = 11000000;
 
-      // Work out which channels actually animate before emitting anything, so
-      // the Definitions count matches and constant channels cost nothing. A
-      // single key is a constant value the bone's Lcl property already holds.
-      struct AnimChan {
-        size_t   bone;
-        int      kind;                 // 0 = translation, 1 = rotation, 2 = scale
-        std::vector<int64_t> times;
-        std::vector<float>   v[3];
-      };
       std::vector<AnimChan> chans;
-
-      if (pAnim) {
-        for (const auto &tr : pAnim->vTracks) {
-          const int b = skel.FindBoneById(tr.uiBoneId);
-          if (b < 0) continue;          // clip drives a bone this rig lacks
-
-          if (tr.vPosition.size() >= 2) {
-            AnimChan c; c.bone = (size_t)b; c.kind = 0;
-            for (const auto &k : tr.vPosition) {
-              c.times.push_back(MsToKTime(k.uiTimeMs));
-              for (int a = 0; a < 3; a++) c.v[a].push_back(k.v[a]);
-            }
-            chans.push_back(std::move(c));
-          }
-          if (tr.vRotation.size() >= 2) {
-            std::vector<double> eul;
-            QuatTrackToEuler(tr.vRotation, eul);
-            AnimChan c; c.bone = (size_t)b; c.kind = 1;
-            for (size_t k = 0; k < tr.vRotation.size(); k++) {
-              c.times.push_back(MsToKTime(tr.vRotation[k].uiTimeMs));
-              for (int a = 0; a < 3; a++) c.v[a].push_back((float)eul[k * 3 + a]);
-            }
-            chans.push_back(std::move(c));
-          }
-          if (tr.vScale.size() >= 2) {
-            AnimChan c; c.bone = (size_t)b; c.kind = 2;
-            for (const auto &k : tr.vScale) {
-              c.times.push_back(MsToKTime(k.uiTimeMs));
-              for (int a = 0; a < 3; a++) c.v[a].push_back(k.v[a]);
-            }
-            chans.push_back(std::move(c));
-          }
-        }
-      }
+      if (pAnim) BuildAnimChannels(skel, *pAnim, chans);
       const size_t nChan = chans.size();
+      const AnimIds animId = AnimIdsFor(0, nChan);
+      const int64_t idAnimStack = animId.stack;
+      const int64_t idAnimLayer = animId.layer;
+      const int64_t idNodeBase  = animId.nodeBase;
+      const int64_t idCurveBase = animId.curveBase;
+      (void)idAnimLayer; (void)idNodeBase; (void)idCurveBase;
 
       std::vector<FbxNode> roots;
       const int64_t llClipStop = (nChan && pAnim) ? MsToKTime(pAnim->DurationMs())
@@ -936,40 +1035,8 @@ namespace kukdh1 {
           mdl.Child("Culling").Str("CullingOff");
         }
 
-        if (nChan) {
-          const int64_t stop = MsToKTime(pAnim->DurationMs());
-          {
-            FbxNode &st = objs.Child("AnimationStack");
-            st.I64(idAnimStack);
-            st.NameClass("Take 001", "AnimStack");
-            st.Str("");
-            FbxNode &p70 = st.Child("Properties70");
-            { FbxNode &p = p70.Child("P"); p.P("LocalStop", "KTime", "Time", ""); p.I64(stop); }
-            { FbxNode &p = p70.Child("P"); p.P("ReferenceStop", "KTime", "Time", ""); p.I64(stop); }
-          }
-          {
-            FbxNode &ly = objs.Child("AnimationLayer");
-            ly.I64(idAnimLayer);
-            ly.NameClass("Base Layer", "AnimLayer");
-            ly.Str("");
-          }
-          static const char *kAxis[3] = { "d|X", "d|Y", "d|Z" };
-          for (size_t k = 0; k < nChan; k++) {
-            const AnimChan &c = chans[k];
-            FbxNode &cn = objs.Child("AnimationCurveNode");
-            cn.I64(idNodeBase + (int64_t)k);
-            cn.NameClass(c.kind == 0 ? "T" : c.kind == 1 ? "R" : "S", "AnimCurveNode");
-            cn.Str("");
-            FbxNode &p70 = cn.Child("Properties70");
-            for (int a = 0; a < 3; a++) {
-              FbxNode &p = p70.Child("P");
-              p.P(kAxis[a], "Number", "", "A");
-              p.F64(c.v[a].empty() ? 0.0 : c.v[a][0]);
-            }
-            for (int a = 0; a < 3; a++)
-              EmitCurve(objs, idCurveBase + (int64_t)(k * 3 + a), c.times, c.v[a]);
-          }
-        }
+        if (nChan)
+          EmitAnimStack(objs, chans, "Take 001", animId, MsToKTime(pAnim->DurationMs()));
 
         roots.push_back(std::move(objs));
       }
@@ -986,47 +1053,15 @@ namespace kukdh1 {
             c.I64(idModelBase + (int64_t)i);
             c.I64(par < 0 ? 0 : idModelBase + (int64_t)par); }
         }
-        if (nChan) {
-          static const char *kProp[3] = { "Lcl Translation", "Lcl Rotation", "Lcl Scaling" };
-          static const char *kAxis[3] = { "d|X", "d|Y", "d|Z" };
-          { FbxNode &c = conn.Child("C"); c.Str("OO"); c.I64(idAnimStack); c.I64(0); }
-          { FbxNode &c = conn.Child("C"); c.Str("OO"); c.I64(idAnimLayer); c.I64(idAnimStack); }
-          for (size_t k = 0; k < nChan; k++) {
-            const AnimChan &ch = chans[k];
-            { FbxNode &c = conn.Child("C"); c.Str("OO");
-              c.I64(idNodeBase + (int64_t)k); c.I64(idAnimLayer); }
-            // The curve node drives one property of one bone.
-            { FbxNode &c = conn.Child("C"); c.Str("OP");
-              c.I64(idNodeBase + (int64_t)k);
-              c.I64(idModelBase + (int64_t)ch.bone);
-              c.Str(kProp[ch.kind]); }
-            for (int a = 0; a < 3; a++) {
-              FbxNode &c = conn.Child("C"); c.Str("OP");
-              c.I64(idCurveBase + (int64_t)(k * 3 + a));
-              c.I64(idNodeBase + (int64_t)k);
-              c.Str(kAxis[a]);
-            }
-          }
-        }
+        if (nChan) EmitAnimConnections(conn, chans, animId, idModelBase);
         roots.push_back(std::move(conn));
       }
 
-      {
-        // Current on its own names a take that does not exist, so a reader
-        // looking the take up finds nothing -- which is exactly how UE reports
-        // "There was nothing to import". The Take entry has to be here too,
-        // carrying the same span as the AnimationStack.
-        FbxNode takes("Takes");
-        takes.Child("Current").Str(nChan ? "Take 001" : "");
-        if (nChan) {
-          const int64_t stop = MsToKTime(pAnim->DurationMs());
-          FbxNode &tk = takes.Child("Take");
-          tk.Str("Take 001");
-          tk.Child("FileName").Str("Take 001.tak");
-          { FbxNode &t = tk.Child("LocalTime");     t.I64(0); t.I64(stop); }
-          { FbxNode &t = tk.Child("ReferenceTime"); t.I64(0); t.I64(stop); }
-        }
-        roots.push_back(std::move(takes));
+      if (nChan) {
+        const int64_t stop = MsToKTime(pAnim->DurationMs());
+        EmitTakes(roots, { "Take 001" }, { stop });
+      } else {
+        EmitTakes(roots, {}, {});
       }
 
       EmitFbxFile(f, roots);
@@ -1056,7 +1091,8 @@ namespace kukdh1 {
 
     bool WriteSkinnedFbx(const PacModel &model, const PabSkeleton &skel,
                          const PamTextureFileList &vTextureFiles,
-                         const std::wstring &wsPath, std::wstring &wsError) {
+                         const std::wstring &wsPath, std::wstring &wsError,
+                         const std::vector<PamAnimClip> &vClips) {
       if (skel.IsEmpty()) { wsError = L"The skeleton has no bones."; return false; }
 
       // Resolve the mesh's bone palette onto the skeleton by bone id. If this
@@ -1150,14 +1186,40 @@ namespace kukdh1 {
       const int64_t idVidBase   = 13000000;
       const size_t  nMat        = model.vSubmeshes.size();
 
+      // Build every clip's channels up front: the Definitions counts depend on
+      // them, and a clip that drives none of this rig is dropped rather than
+      // written as an empty take.
+      std::vector<std::vector<AnimChan>> clipChans;
+      std::vector<std::string>           clipNames;
+      std::vector<int64_t>               clipStops;
+      size_t maxChan = 0, totalChan = 0;
+      for (const auto &clip : vClips) {
+        if (!clip.pAnim) continue;
+        std::vector<AnimChan> ch;
+        BuildAnimChannels(skel, *clip.pAnim, ch);
+        if (ch.empty()) continue;
+        if (ch.size() > maxChan) maxChan = ch.size();
+        totalChan += ch.size();
+        clipStops.push_back(MsToKTime(clip.pAnim->DurationMs()));
+        clipNames.push_back(clip.sName);
+        clipChans.push_back(std::move(ch));
+      }
+      const size_t nClips = clipChans.size();
+
+      // The scene timeline has to span the longest clip, since UE's default
+      // animation range is "Exported Time" -- that field, not the curves.
+      int64_t llSpan = kKTimePerSecond;
+      for (int64_t s : clipStops) if (s > llSpan) llSpan = s;
+
       std::vector<FbxNode> roots;
-      BuildFbxPreamble(roots);
+      BuildFbxPreamble(roots, nClips ? clipNames[0].c_str() : "", llSpan);
 
       {
         FbxNode defs("Definitions");
         defs.Child("Version").I32(100);
         defs.Child("Count").I32((int32_t)(3 + skel.vBones.size() * 2 + active.size() + 1
-                                          + nMat + 2 * texSlots.size()));
+                                          + nMat + 2 * texSlots.size()
+                                          + (nClips ? nClips * 2 + totalChan * 4 : 0)));
         { FbxNode &o = defs.Child("ObjectType"); o.Str("GlobalSettings"); o.Child("Count").I32(1); }
         { FbxNode &o = defs.Child("ObjectType"); o.Str("Geometry");  o.Child("Count").I32(1); }
         { FbxNode &o = defs.Child("ObjectType"); o.Str("Model");
@@ -1174,6 +1236,16 @@ namespace kukdh1 {
             o.Child("Count").I32((int32_t)texSlots.size()); }
           { FbxNode &o = defs.Child("ObjectType"); o.Str("Video");
             o.Child("Count").I32((int32_t)texSlots.size()); }
+        }
+        if (nClips) {
+          { FbxNode &o = defs.Child("ObjectType"); o.Str("AnimationStack");
+            o.Child("Count").I32((int32_t)nClips); }
+          { FbxNode &o = defs.Child("ObjectType"); o.Str("AnimationLayer");
+            o.Child("Count").I32((int32_t)nClips); }
+          { FbxNode &o = defs.Child("ObjectType"); o.Str("AnimationCurveNode");
+            o.Child("Count").I32((int32_t)totalChan); }
+          { FbxNode &o = defs.Child("ObjectType"); o.Str("AnimationCurve");
+            o.Child("Count").I32((int32_t)(totalChan * 3)); }
         }
         roots.push_back(std::move(defs));
       }
@@ -1402,6 +1474,9 @@ namespace kukdh1 {
           }
         }
 
+        for (size_t c = 0; c < nClips; c++)
+          EmitAnimStack(objs, clipChans[c], clipNames[c], AnimIdsFor(c, maxChan), clipStops[c]);
+
         roots.push_back(std::move(objs));
       }
 
@@ -1438,10 +1513,12 @@ namespace kukdh1 {
           { FbxNode &c = conn.Child("C"); c.Str("OO");
             c.I64(idModelBase + (int64_t)active[k]); c.I64(idClusBase + (int64_t)k); }
         }
+        for (size_t c = 0; c < nClips; c++)
+          EmitAnimConnections(conn, clipChans[c], AnimIdsFor(c, maxChan), idModelBase);
         roots.push_back(std::move(conn));
       }
 
-      { FbxNode takes("Takes"); takes.Child("Current").Str(""); roots.push_back(std::move(takes)); }
+      EmitTakes(roots, clipNames, clipStops);
 
       EmitFbxFile(f, roots);
 
@@ -1510,13 +1587,14 @@ namespace kukdh1 {
 
   bool ExportSkinnedModel(const PacModel &model, const PabSkeleton &skel,
                           const PamTextureFileList &vTextureFiles,
-                          const std::wstring &wsPath, std::wstring &wsError) {
+                          const std::wstring &wsPath, std::wstring &wsError,
+                          const std::vector<PamAnimClip> &vClips) {
     wsError.clear();
     if (model.IsEmpty()) {
       wsError = L"The model has no geometry to export.";
       return false;
     }
-    return WriteSkinnedFbx(model, skel, vTextureFiles, wsPath, wsError);
+    return WriteSkinnedFbx(model, skel, vTextureFiles, wsPath, wsError, vClips);
   }
 
 }

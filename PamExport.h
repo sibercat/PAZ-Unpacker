@@ -46,13 +46,27 @@ namespace kukdh1 {
   bool ExportAnimation(const PabSkeleton &skel, const PaaAnimation &anim,
                        const std::wstring &wsPath, std::wstring &wsError);
 
+  // One animation clip to carry alongside a mesh, as its own FBX take. The
+  // caller owns the PaaAnimation.
+  struct PamAnimClip {
+    std::string         sName;    // take name, normally the .paa file name
+    const PaaAnimation *pAnim;
+  };
+
   // Writes a .pac character mesh bound to its .pab skeleton: geometry plus a
   // bone hierarchy, skin clusters and a bind pose. The mesh's bone palette is
   // resolved against the skeleton by bone id, so the two files must belong
   // together; wsError explains it if they do not. FBX only.
+  //
+  // Any clips given are written into the same file, one AnimationStack each.
+  // That is not a convenience: Unreal produces nothing at all from an
+  // animation-only FBX -- verified against UE 5.8, and equally true of one
+  // Blender itself exported -- whereas a file carrying the mesh and its takes
+  // together imports as a SkeletalMesh plus one AnimSequence per take.
   bool ExportSkinnedModel(const PacModel &model, const PabSkeleton &skel,
                           const PamTextureFileList &vTextureFiles,
-                          const std::wstring &wsPath, std::wstring &wsError);
+                          const std::wstring &wsPath, std::wstring &wsError,
+                          const std::vector<PamAnimClip> &vClips = {});
 
 }
 
