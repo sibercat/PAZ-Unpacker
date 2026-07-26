@@ -38,6 +38,32 @@ namespace kukdh1 {
       f.write(buf.data(), (std::streamsize)n);
     }
 
+    // ── Y-up to Z-up ─────────────────────────────────────────────────────────
+    //
+    // The archive stores Y-up; ActorX files are read as Z-up, by Max and by
+    // Unreal. FBX escapes this because it carries an UpAxis field and readers
+    // rotate for us, but .psk has nowhere to say it, so the conversion has to
+    // be baked into the data or every import lands on its side.
+    //
+    // It is a +90 degree rotation about X: (x, y, z) -> (x, -z, y).
+    void YUpToZUp(float v[3]) {
+      const float y = v[1], z = v[2];
+      v[1] = -z;
+      v[2] =  y;
+    }
+
+    // Rotating the whole scene changes only the ROOT bone's local transform:
+    // every other bone is parent-relative, and W' = R*W_parent*L leaves L
+    // alone. So this is applied to the root and inherited by the rest.
+    void YUpToZUpQuat(float q[4]) {
+      const float s = 0.70710678f;              // sin/cos of 45 degrees
+      const float x = q[0], y = q[1], z = q[2], w = q[3];
+      q[0] = s * (x + w);
+      q[1] = s * (y - z);
+      q[2] = s * (z + y);
+      q[3] = s * (w - x);
+    }
+
     // ── Bone records ─────────────────────────────────────────────────────────
 
     // REFSKELT and BONENAMES share this 120-byte record.
@@ -56,15 +82,23 @@ namespace kukdh1 {
       // which cancels for that one bone. Storing it the other way round sends
       // each bone's local offset off along the wrong axis, and the rig fans out
       // in a straight line instead of following the chain.
-      float x = b.fQuat[0], y = b.fQuat[1], z = b.fQuat[2], w = b.fQuat[3];
-      const float n = std::sqrt(x*x + y*y + z*z + w*w);
-      if (n > 0.0f) { x /= n; y /= n; z /= n; w /= n; }
-      if (!bRoot) { x = -x; y = -y; z = -z; }
+      float q[4] = { b.fQuat[0], b.fQuat[1], b.fQuat[2], b.fQuat[3] };
+      const float n = std::sqrt(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
+      if (n > 0.0f) for (int k = 0; k < 4; k++) q[k] /= n;
 
-      Put<float>(f, x); Put<float>(f, y); Put<float>(f, z); Put<float>(f, w);
-      Put<float>(f, b.fTrans[0]);
-      Put<float>(f, b.fTrans[1]);
-      Put<float>(f, b.fTrans[2]);
+      float t[3] = { b.fTrans[0], b.fTrans[1], b.fTrans[2] };
+      if (bRoot) {
+        // Carry the whole rig from Y-up into Z-up, once, at the root.
+        YUpToZUpQuat(q);
+        YUpToZUp(t);
+      } else {
+        q[0] = -q[0]; q[1] = -q[1]; q[2] = -q[2];
+      }
+
+      Put<float>(f, q[0]); Put<float>(f, q[1]); Put<float>(f, q[2]); Put<float>(f, q[3]);
+      Put<float>(f, t[0]);
+      Put<float>(f, t[1]);
+      Put<float>(f, t[2]);
       Put<float>(f, 0.0f);                                  // length, cosmetic
       Put<float>(f, 1.0f); Put<float>(f, 1.0f); Put<float>(f, 1.0f);   // size
     }
@@ -128,7 +162,11 @@ namespace kukdh1 {
 
       for (const auto &v : sm.vVertices) {
         const uint32_t point = (uint32_t)(points.size() / 3);
-        points.push_back(v.x); points.push_back(v.y); points.push_back(v.z);
+        // Vertices are in bind space, so they take the same Y-up to Z-up turn
+        // the root bone does.
+        float p[3] = { v.x, v.y, v.z };
+        YUpToZUp(p);
+        points.push_back(p[0]); points.push_back(p[1]); points.push_back(p[2]);
 
         Wedge w;
         w.point = point;
@@ -372,8 +410,16 @@ namespace kukdh1 {
           for (int k = 0; k < 4; k++) len += quat[k] * quat[k];
           len = std::sqrt(len);
           if (len > 0.0f) for (int k = 0; k < 4; k++) quat[k] /= len;
-          // Same convention as the bone table: conjugated except at the root.
-          if (bone.iParent >= 0) { quat[0] = -quat[0]; quat[1] = -quat[1]; quat[2] = -quat[2]; }
+
+          // Same treatment as the bone table, and for the same reasons: the
+          // root carries the Y-up to Z-up turn, everything else is stored
+          // conjugated.
+          if (bone.iParent < 0) {
+            YUpToZUpQuat(quat);
+            YUpToZUp(pos);
+          } else {
+            quat[0] = -quat[0]; quat[1] = -quat[1]; quat[2] = -quat[2];
+          }
 
           Put<float>(f, pos[0]); Put<float>(f, pos[1]); Put<float>(f, pos[2]);
           Put<float>(f, quat[0]); Put<float>(f, quat[1]);
