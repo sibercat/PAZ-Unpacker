@@ -1302,9 +1302,11 @@ namespace kukdh1 {
           cl.Child("Indexes").ArrI32(clusterIdx[b]);
           cl.Child("Weights").ArrF64(clusterWgt[b]);
 
-          // Transform takes the mesh into the bone's space at bind time and
-          // TransformLink is the bone's world transform; the mesh itself sits
-          // at the origin, so Transform is simply the inverse.
+          // TransformLink is the bone's world transform at bind time, and
+          // Transform is the mesh expressed in that bone's space: a reader
+          // recovers the mesh's world matrix as TransformLink * Transform
+          // (this is literally what Blender's importer computes). The mesh
+          // sits at the origin, so Transform is simply the inverse.
           const float *W = &world[b * 16];
           double inv[16];
           InvertRigid(W, inv);
