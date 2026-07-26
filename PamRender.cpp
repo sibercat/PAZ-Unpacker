@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <thread>
+#include <vector>
 
 namespace kukdh1 {
 
@@ -308,12 +310,25 @@ namespace kukdh1 {
     }
 
     // ── Rasterise ────────────────────────────────────────────────────────────
-    uint32_t drawn = 0;
     float *depth = target.vDepth.data();
     uint32_t *px = target.pPixels;
 
+    // Rasterisation is split into horizontal bands, one per worker. A band owns
+    // disjoint rows of both the colour and the depth buffer, so nothing needs
+    // locking, and every pixel is produced by exactly the same arithmetic as
+    // the single-threaded path — the output is byte-identical, which is what
+    // the change was verified against.
+    //
+    // Every band walks every triangle; only the pixel loop is divided, not the
+    // setup. That is the right trade because the slow cases here are fill
+    // bound: a 68k-triangle character at 1080p spends far longer shading
+    // pixels than iterating triangles.
+    auto renderBand = [&](int bandY0, int bandY1) -> uint32_t {
+    uint32_t drawn = 0;
+
     // Rasterises one screen-space triangle. Shared by the common all-in-front
     // path and by the fragments produced when a triangle is clipped.
+    // Per-band copies: threads must not share the current submesh state.
     const PamTexture *tex = nullptr;
     float texW = 0.0f, texH = 0.0f;
     const uint8_t *tint = kSubmeshTint[0];
@@ -339,6 +354,13 @@ namespace kukdh1 {
         if (maxX > W - 1) maxX = W - 1;
         if (maxY > H - 1) maxY = H - 1;
         if (minX > maxX || minY > maxY) return false;
+
+        // Accept/reject is decided against the whole target, above, so the
+        // triangle count a band reports matches the single-threaded one.
+        // Only the rows actually drawn are narrowed to this band.
+        if (minY < bandY0)     minY = bandY0;
+        if (maxY > bandY1 - 1) maxY = bandY1 - 1;
+        if (minY > maxY) return true;    // counted, but nothing lands here
 
         const float invArea = 1.0f / area;
 
@@ -511,8 +533,40 @@ namespace kukdh1 {
         if (n == 4 && rasterTri(clipped[0], clipped[2], clipped[3])) drawn++;
       }
     }
+    return drawn;
+    };  // renderBand
+
+    // One band per hardware thread, but never so thin that a band's share of
+    // the pixels stops paying for its walk over every triangle.
+    constexpr int MIN_BAND_ROWS = 64;
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = 1;
+    unsigned bands = (unsigned)((H + MIN_BAND_ROWS - 1) / MIN_BAND_ROWS);
+    if (bands > hw) bands = hw;
+    if (bands < 1)  bands = 1;
+
+    uint32_t drawn = 0;
+    if (bands == 1) {
+      drawn = renderBand(0, H);
+    } else {
+      const int rows = (H + (int)bands - 1) / (int)bands;
+      std::vector<std::thread> workers;
+      workers.reserve(bands - 1);
+      for (unsigned b = 1; b < bands; b++) {
+        const int y0 = (std::min)(H, (int)b * rows);
+        const int y1 = (std::min)(H, y0 + rows);
+        if (y0 >= y1) break;
+        workers.emplace_back([&renderBand, y0, y1]() { renderBand(y0, y1); });
+      }
+      // Band 0 runs on the calling thread. Its count is the whole-model
+      // triangle count, because accept/reject above ignores the band.
+      drawn = renderBand(0, (std::min)(H, rows));
+      for (auto &t : workers) t.join();
+    }
 
     // ── Optional wireframe overlay ───────────────────────────────────────────
+    // Left single-threaded: DrawLine writes across arbitrary rows, so it is
+    // not band-safe, and it only runs in the debug shade mode anyway.
     if (mode == PAM_SHADE_WIREFRAME) {
       const uint32_t wire = PackRGB(40, 40, 44);
       for (size_t i = 0; i + 2 < model.vIndices.size(); i += 3) {
