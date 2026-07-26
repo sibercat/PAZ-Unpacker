@@ -94,9 +94,19 @@ Verified end to end on a 91-bone creature: 53,013 verts, a Skin modifier bound
 to every bone, and **28 of 28 animation clips** arriving in UE5 as
 `AnimSequence` assets with their original timing intact.
 
-`.psk`/`.psa` is worth using for Max and Blender generally — the format is
-unambiguous where FBX is not, and Max reads it as a real bone hierarchy rather
-than a pile of dummy helpers.
+#### Blender
+
+FBX works directly — mesh, skeleton and animation all import as they are.
+
+If you would rather use ActorX there too, Blender has a PSK/PSA add-on on the
+official extensions platform:
+[io_scene_psk_psa](https://extensions.blender.org/add-ons/io-scene-psk-psa).
+The 3ds Max route above is the one verified here, so treat that as the tested
+path and the Blender add-on as the convenient one.
+
+`.psk`/`.psa` is worth using generally — the format is unambiguous where FBX is
+not, and Max reads it as a real bone hierarchy rather than a pile of dummy
+helpers.
 
 ## Requirements
 
