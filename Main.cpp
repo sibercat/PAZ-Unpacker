@@ -3320,7 +3320,10 @@ void UpdatePreview(kukdh1::Tree *pTree) {
   std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c){ return (char)::tolower(c); });
 
   // ── 3D model preview ──────────────────────────────────────────────────────
-  if (ext == ".pam") {
+  // .pac character meshes are flattened into the same static shape the
+  // rasteriser already draws; the skin is irrelevant for a bind-pose preview.
+  if (ext == ".pam" || ext == ".pac") {
+    const bool bCharacter = (ext == ".pac");
     if (info.uiOriginalSize > (uint32_t)MODEL_SIZE_LIMIT) {
       SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Model too large to preview");
       return;
@@ -3343,7 +3346,13 @@ void UpdatePreview(kukdh1::Tree *pTree) {
     }
 
     auto model = std::make_unique<kukdh1::PamModel>();
-    bool loaded = model->Load(mTempPath);
+    bool loaded = false;
+    if (bCharacter) {
+      kukdh1::PacModel pac;
+      loaded = pac.Load(mTempPath) && kukdh1::PacToPamModel(pac, *model);
+    } else {
+      loaded = model->Load(mTempPath);
+    }
     DeleteFile(mTempPath.c_str());
 
     if (!loaded || model->IsEmpty()) {

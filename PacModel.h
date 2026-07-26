@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "PamModel.h"
+
 namespace kukdh1 {
 
   // ── PAC ("PAR " type 0x03) skinned character mesh ──────────────────────────
@@ -92,6 +94,19 @@ namespace kukdh1 {
       void ComputeNormals(PacSubmesh &sm) const;
       void Clear();
   };
+
+  // Flattens a character mesh into the static-model shape the rasteriser and
+  // the OBJ/FBX writers already understand: submesh vertices concatenated,
+  // indices rebased, bounding box computed.
+  //
+  // Skin weights are dropped -- this is for previewing and for paths that do
+  // not care about the rig. Use PacModel plus PabSkeleton directly when the
+  // binding matters.
+  //
+  // Each submesh's texture is set to "<submesh name>.dds", which is the
+  // archive's naming convention (see PacModel above), so the existing
+  // by-name texture lookup resolves a character mesh unchanged.
+  bool PacToPamModel(const PacModel &src, PamModel &dst);
 
 }
 

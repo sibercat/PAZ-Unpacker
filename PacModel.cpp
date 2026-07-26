@@ -194,6 +194,60 @@ bool PacModel::LoadFromMemory(const uint8_t *pData, size_t stSize) {
   return !IsEmpty();
 }
 
+bool PacToPamModel(const PacModel &src, PamModel &dst) {
+  dst = PamModel();
+  if (src.vSubmeshes.empty()) return false;
+
+  size_t totalV = 0, totalI = 0;
+  for (const auto &sm : src.vSubmeshes) {
+    totalV += sm.vVertices.size();
+    totalI += sm.vIndices.size();
+  }
+  if (!totalV || !totalI) return false;
+
+  dst.vVertices.reserve(totalV);
+  dst.vIndices.reserve(totalI);
+  dst.vSubmeshes.reserve(src.vSubmeshes.size());
+
+  float lo[3] = {  1e30f,  1e30f,  1e30f };
+  float hi[3] = { -1e30f, -1e30f, -1e30f };
+
+  uint32_t baseV = 0, baseI = 0;
+  for (const auto &sm : src.vSubmeshes) {
+    for (const auto &v : sm.vVertices) {
+      PamVertex pv;
+      pv.x = v.x;  pv.y = v.y;  pv.z = v.z;
+      pv.u = v.u;  pv.v = v.v;
+      pv.nx = v.nx; pv.ny = v.ny; pv.nz = v.nz;
+      dst.vVertices.push_back(pv);
+
+      const float p[3] = { v.x, v.y, v.z };
+      for (int k = 0; k < 3; k++) {
+        if (p[k] < lo[k]) lo[k] = p[k];
+        if (p[k] > hi[k]) hi[k] = p[k];
+      }
+    }
+    // PamModel indices are global; PacModel's are submesh-local.
+    for (uint32_t i : sm.vIndices) dst.vIndices.push_back(baseV + i);
+
+    PamSubmesh out;
+    out.uiBaseVertex  = baseV;
+    out.uiVertexCount = (uint32_t)sm.vVertices.size();
+    out.uiBaseIndex   = baseI;
+    out.uiIndexCount  = (uint32_t)sm.vIndices.size();
+    out.sTexture      = sm.sName.empty() ? std::string() : sm.sName + ".dds";
+    dst.vSubmeshes.push_back(std::move(out));
+
+    baseV += (uint32_t)sm.vVertices.size();
+    baseI += (uint32_t)sm.vIndices.size();
+  }
+
+  for (int k = 0; k < 3; k++) { dst.fBBoxMin[k] = lo[k]; dst.fBBoxMax[k] = hi[k]; }
+  dst.uiVersion      = src.uiVersion;
+  dst.uiVertexStride = 32;
+  return true;
+}
+
 void PacModel::ComputeNormals(PacSubmesh &sm) const {
   for (auto &v : sm.vVertices) { v.nx = v.ny = v.nz = 0.0f; }
 
