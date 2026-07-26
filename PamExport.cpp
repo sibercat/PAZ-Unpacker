@@ -299,8 +299,14 @@ namespace kukdh1 {
     // pActiveAnimStack names the scene's active AnimationStack, or is empty for
     // a file with no animation. A reader that honours it will otherwise look
     // for a stack called "" and play nothing.
+    //
+    // llTimeSpanStop is the scene timeline's end. It has to cover the clip:
+    // UE's default animation range is "Exported Time", which is this field, so
+    // a timeline shorter than the animation truncates it. One second is only a
+    // sensible default for files with no animation at all.
     void BuildFbxPreamble(std::vector<FbxNode> &roots,
-                          const char *pActiveAnimStack = "") {
+                          const char *pActiveAnimStack = "",
+                          int64_t llTimeSpanStop = kKTimePerSecond) {
       const int64_t idDocument = 100000;
       const char *kCreator = "PAZ Unpacker FBX Export";
 
@@ -412,7 +418,7 @@ namespace kukdh1 {
         // enough; the real clip length travels on the AnimationStack anyway.
         { FbxNode &p = p70.Child("P"); p.P("TimeMode", "enum", "", ""); p.I32(10); }
         { FbxNode &p = p70.Child("P"); p.P("TimeSpanStart", "KTime", "Time", ""); p.I64(0); }
-        { FbxNode &p = p70.Child("P"); p.P("TimeSpanStop", "KTime", "Time", ""); p.I64(kKTimePerSecond); }
+        { FbxNode &p = p70.Child("P"); p.P("TimeSpanStop", "KTime", "Time", ""); p.I64(llTimeSpanStop); }
         { FbxNode &p = p70.Child("P"); p.P("CustomFrameRate", "double", "Number", ""); p.F64(25.0); }
         roots.push_back(std::move(gs));
       }
@@ -859,7 +865,9 @@ namespace kukdh1 {
       const size_t nChan = chans.size();
 
       std::vector<FbxNode> roots;
-      BuildFbxPreamble(roots, nChan ? "Take 001" : "");
+      const int64_t llClipStop = (nChan && pAnim) ? MsToKTime(pAnim->DurationMs())
+                                                  : kKTimePerSecond;
+      BuildFbxPreamble(roots, nChan ? "Take 001" : "", llClipStop);
 
       {
         FbxNode defs("Definitions");
