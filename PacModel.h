@@ -16,9 +16,14 @@ namespace kukdh1 {
   //    0x04  uint8     0x03 (character mesh)
   //    0x05  uint8     version: 1, 2 or 3
   //    0x06  uint8[10] 00 01 02 03 04 05 06 07 08 09 (constant)
-  //    0x10  uint32    unknown
-  //    0x14  uint8     bone palette count
-  //    0x15  uint32[]  bone palette -- see below
+  //
+  //    All three versions share this shape; only where the palette starts
+  //    differs. Version 1 puts the count at 0x10 and the palette at 0x11,
+  //    unaligned. Versions 2 and 3 put the count at 0x14, with four bytes of
+  //    something else at 0x10.
+  //
+  //          uint8     bone palette count
+  //          uint32[]  bone palette -- see below
   //          uint8     count of a second small list
   //          uint8[]   that list (purpose unknown, skipped)
   //          uint32    unknown
@@ -51,8 +56,8 @@ namespace kukdh1 {
   //
   //  Only LOD 0 is kept -- the other two are reduced copies of the same mesh.
   //
-  //  Version 1 uses a different header and is rejected. Versions 2 and 3 parse
-  //  100% of a 78-file sample, and version 3 covers every character mesh seen.
+  //  All three versions are supported. Version 1 carries the player character
+  //  head, hair, eye and body meshes, so it is not a legacy corner.
 
   struct PacVertex {
     float   x, y, z;

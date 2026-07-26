@@ -103,10 +103,13 @@ bool PacModel::LoadFromMemory(const uint8_t *pData, size_t stSize) {
   if (pData[4] != TYPE_CHARACTER_MESH)      return false;
 
   uiVersion = pData[5];
-  // Version 1 lays its header out differently and is not supported.
-  if (uiVersion != 2 && uiVersion != 3) { Clear(); return false; }
+  if (uiVersion < 1 || uiVersion > 3) { Clear(); return false; }
 
-  size_t off = 0x14;
+  // All three versions share the same header shape; only the offset of the
+  // palette count differs. Version 1 puts it at 0x10 with the palette
+  // immediately after at 0x11 (unaligned, as elsewhere in this family);
+  // versions 2 and 3 put it at 0x14.
+  size_t off = (uiVersion == 1) ? 0x10 : 0x14;
   const size_t paletteCount = pData[off++];
   if (off + 4 * paletteCount > stSize) { Clear(); return false; }
   vBonePalette.reserve(paletteCount);
