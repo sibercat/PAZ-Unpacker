@@ -2634,6 +2634,12 @@ static std::wstring ExportCharacterAnimations(const std::string &sPacPath,
                mismatched, failed);
     out += extra;
   }
+  // Unreal builds nothing from an animation-only FBX, and says so in a way that
+  // reads as a broken export rather than the wrong format. Better to say where
+  // these files work before anyone spends an evening on it.
+  out += L"\r\n\r\nThese import into Blender directly. Unreal will not read an "
+         L"animation-only FBX \x2014 export the character as ActorX (.psk) "
+         L"instead and follow the steps in the README.";
   return out;
 }
 
