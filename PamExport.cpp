@@ -292,7 +292,15 @@ namespace kukdh1 {
     // so the mesh and skeleton exports cannot drift apart -- in particular
     // the FileId / CreationTime / footer-id checksum triple, which only
     // validates as a matched set.
-    void BuildFbxPreamble(std::vector<FbxNode> &roots) {
+    // FBX measures time in KTime units; this is the documented tick rate. Used
+    // by the preamble's time span as well as the animation writers.
+    constexpr int64_t kKTimePerSecond = 46186158000LL;
+
+    // pActiveAnimStack names the scene's active AnimationStack, or is empty for
+    // a file with no animation. A reader that honours it will otherwise look
+    // for a stack called "" and play nothing.
+    void BuildFbxPreamble(std::vector<FbxNode> &roots,
+                          const char *pActiveAnimStack = "") {
       const int64_t idDocument = 100000;
       const char *kCreator = "PAZ Unpacker FBX Export";
 
@@ -396,6 +404,16 @@ namespace kukdh1 {
         { FbxNode &p = p70.Child("P"); p.P("CoordAxis", "int", "Integer", ""); p.I32(0); }
         { FbxNode &p = p70.Child("P"); p.P("CoordAxisSign", "int", "Integer", ""); p.I32(1); }
         { FbxNode &p = p70.Child("P"); p.P("UnitScaleFactor", "double", "Number", ""); p.F64(1.0); }
+        { FbxNode &p = p70.Child("P"); p.P("OriginalUnitScaleFactor", "double", "Number", ""); p.F64(1.0); }
+        // Time settings. Without these a reader has no scene frame rate or time
+        // span to work from: UE reports "There was nothing to import" for an
+        // animation-only file, because it derives the import range from here.
+        // 10 is ePAL (25 fps), which matches the millisecond key times closely
+        // enough; the real clip length travels on the AnimationStack anyway.
+        { FbxNode &p = p70.Child("P"); p.P("TimeMode", "enum", "", ""); p.I32(10); }
+        { FbxNode &p = p70.Child("P"); p.P("TimeSpanStart", "KTime", "Time", ""); p.I64(0); }
+        { FbxNode &p = p70.Child("P"); p.P("TimeSpanStop", "KTime", "Time", ""); p.I64(kKTimePerSecond); }
+        { FbxNode &p = p70.Child("P"); p.P("CustomFrameRate", "double", "Number", ""); p.F64(25.0); }
         roots.push_back(std::move(gs));
       }
       {
@@ -409,7 +427,8 @@ namespace kukdh1 {
         {
           FbxNode &p70 = d.Child("Properties70");
           { FbxNode &p = p70.Child("P"); p.P("SourceObject", "object", "", ""); }
-          { FbxNode &p = p70.Child("P"); p.P("ActiveAnimStackName", "KString", "", ""); p.Str(""); }
+          { FbxNode &p = p70.Child("P"); p.P("ActiveAnimStackName", "KString", "", "");
+            p.Str(pActiveAnimStack); }
         }
         d.Child("RootNode").I64(0);
         roots.push_back(std::move(doc));
@@ -732,8 +751,6 @@ namespace kukdh1 {
 
     // ── Animation helpers ────────────────────────────────────────────────────
 
-    // FBX measures time in KTime units; this is the documented tick rate.
-    constexpr int64_t kKTimePerSecond = 46186158000LL;
     inline int64_t MsToKTime(uint32_t ms) {
       return (int64_t)ms * (kKTimePerSecond / 1000);
     }
@@ -842,7 +859,7 @@ namespace kukdh1 {
       const size_t nChan = chans.size();
 
       std::vector<FbxNode> roots;
-      BuildFbxPreamble(roots);
+      BuildFbxPreamble(roots, nChan ? "Take 001" : "");
 
       {
         FbxNode defs("Definitions");
@@ -902,6 +919,10 @@ namespace kukdh1 {
               p.F64(euler[0]); p.F64(euler[1]); p.F64(euler[2]); }
             { FbxNode &p = p70.Child("P"); p.P("Lcl Scaling", "Lcl Scaling", "", "A");
               p.F64(b.fScale[0]); p.F64(b.fScale[1]); p.F64(b.fScale[2]); }
+            // Binds the LimbNode attribute to this node; without it Max builds
+            // a Dummy helper instead of a bone.
+            { FbxNode &p = p70.Child("P"); p.P("DefaultAttributeIndex", "int", "Integer", "");
+              p.I32(0); }
           }
           mdl.Child("Shading").Bool(true);
           mdl.Child("Culling").Str("CullingOff");
@@ -983,8 +1004,20 @@ namespace kukdh1 {
       }
 
       {
+        // Current on its own names a take that does not exist, so a reader
+        // looking the take up finds nothing -- which is exactly how UE reports
+        // "There was nothing to import". The Take entry has to be here too,
+        // carrying the same span as the AnimationStack.
         FbxNode takes("Takes");
         takes.Child("Current").Str(nChan ? "Take 001" : "");
+        if (nChan) {
+          const int64_t stop = MsToKTime(pAnim->DurationMs());
+          FbxNode &tk = takes.Child("Take");
+          tk.Str("Take 001");
+          tk.Child("FileName").Str("Take 001.tak");
+          { FbxNode &t = tk.Child("LocalTime");     t.I64(0); t.I64(stop); }
+          { FbxNode &t = tk.Child("ReferenceTime"); t.I64(0); t.I64(stop); }
+        }
         roots.push_back(std::move(takes));
       }
 
@@ -1195,7 +1228,24 @@ namespace kukdh1 {
         mdl.NameClass(stem, "Model");
         mdl.Str("Mesh");
         mdl.Child("Version").I32(232);
-        mdl.Child("Properties70");
+        {
+          // DefaultAttributeIndex is what binds the node's attribute -- here
+          // the geometry -- to the node. Without it 3ds Max builds the node as
+          // a Dummy helper and drops the mesh entirely, while Blender and UE
+          // infer the link from the connection and show nothing wrong.
+          FbxNode &p70 = mdl.Child("Properties70");
+          { FbxNode &p = p70.Child("P"); p.P("Lcl Translation", "Lcl Translation", "", "A");
+            p.F64(0.0); p.F64(0.0); p.F64(0.0); }
+          { FbxNode &p = p70.Child("P"); p.P("Lcl Rotation", "Lcl Rotation", "", "A");
+            p.F64(0.0); p.F64(0.0); p.F64(0.0); }
+          { FbxNode &p = p70.Child("P"); p.P("Lcl Scaling", "Lcl Scaling", "", "A");
+            p.F64(1.0); p.F64(1.0); p.F64(1.0); }
+          { FbxNode &p = p70.Child("P"); p.P("DefaultAttributeIndex", "int", "Integer", "");
+            p.I32(0); }
+          { FbxNode &p = p70.Child("P"); p.P("InheritType", "enum", "", ""); p.I32(1); }
+        }
+        mdl.Child("MultiLayer").I32(0);
+        mdl.Child("MultiTake").I32(0);
         mdl.Child("Shading").Bool(true);
         mdl.Child("Culling").Str("CullingOff");
 
@@ -1228,6 +1278,10 @@ namespace kukdh1 {
               p.F64(euler[0]); p.F64(euler[1]); p.F64(euler[2]); }
             { FbxNode &p = p70.Child("P"); p.P("Lcl Scaling", "Lcl Scaling", "", "A");
               p.F64(b.fScale[0]); p.F64(b.fScale[1]); p.F64(b.fScale[2]); }
+            // Binds the LimbNode attribute to this node; without it Max builds
+            // a Dummy helper instead of a bone.
+            { FbxNode &p = p70.Child("P"); p.P("DefaultAttributeIndex", "int", "Integer", "");
+              p.I32(0); }
           }
           bm.Child("Shading").Bool(true);
           bm.Child("Culling").Str("CullingOff");
