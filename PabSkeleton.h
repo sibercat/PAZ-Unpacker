@@ -110,6 +110,13 @@ namespace kukdh1 {
       int FindBoneById(uint32_t uiId) const;
 
     private:
+      // Reads the bone records. bLooseTail accepts any remainder after the
+      // final record instead of only the known block sizes; LoadFromMemory
+      // tries strict first and falls back, so nothing that parses today can
+      // change. See the note on the trailing block above.
+      bool WalkBones(const uint8_t *pData, size_t stSize,
+                     uint32_t uiBoneCount, bool bLooseTail);
+
       void Clear();
   };
 

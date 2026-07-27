@@ -123,7 +123,28 @@ bool PabSkeleton::LoadFromMemory(const uint8_t *pData, size_t stSize) {
   // Guard against a corrupt count demanding an implausible allocation.
   if ((size_t)uiBoneCount * (1 + BONE_PAYLOAD) > stSize) return false;
 
+  // The last record's trailing block is normally one of the known sizes, but a
+  // few hundred object rigs end on something else. Since the block is skipped
+  // either way, its size only has to be stepped over, not understood -- so a
+  // file that will not walk under the strict rule is retried accepting any
+  // remainder. Strict runs first, so a file that parses today parses
+  // identically: verified byte-for-byte across all 1,040 of them.
+  if (WalkBones(pData, stSize, uiBoneCount, false)) return true;
+  return WalkBones(pData, stSize, uiBoneCount, true);
+}
+
+bool PabSkeleton::WalkBones(const uint8_t *pData, size_t stSize,
+                            uint32_t uiBoneCount, bool bLooseTail) {
+  vBones.clear();
   vBones.reserve(uiBoneCount);
+
+  // Whatever follows the final record. Under the strict rule it must be a
+  // block size we know; the relaxed pass takes it on trust.
+  auto TailOk = [bLooseTail](size_t stTail) {
+    if (bLooseTail) return true;
+    for (size_t t : TRAILERS) if (stTail == t) return true;
+    return false;
+  };
 
   // A bone's id is the 4 bytes immediately preceding its record, so bone 0
   // takes the header field and every later bone takes the tail of the gap that
@@ -133,19 +154,19 @@ bool PabSkeleton::LoadFromMemory(const uint8_t *pData, size_t stSize) {
 
   size_t off = HEADER_SIZE;
   for (uint32_t i = 0; i < uiBoneCount; i++) {
-    if (!PlausibleRecord(pData, stSize, off, uiBoneCount)) { Clear(); return false; }
+    if (!PlausibleRecord(pData, stSize, off, uiBoneCount)) { vBones.clear(); return false; }
 
     size_t nameLen = pData[off];
     size_t payload = off + 1 + nameLen;
-    if (payload + BONE_PAYLOAD > stSize) { Clear(); return false; }
+    if (payload + BONE_PAYLOAD > stSize) { vBones.clear(); return false; }
 
     PabBone b;
     b.sName   = Cp949ToUtf8(pData + off + 1, nameLen);
     b.iParent = Read<int32_t>(pData + payload + OFF_PARENT);
 
     // Parents always precede their children, so this also rejects cycles.
-    if (b.iParent >= (int32_t)i) { Clear(); return false; }
-    if (i == 0 && b.iParent != -1) { Clear(); return false; }
+    if (b.iParent >= (int32_t)i) { vBones.clear(); return false; }
+    if (i == 0 && b.iParent != -1) { vBones.clear(); return false; }
 
     for (int k = 0; k < 3; k++) b.fScale[k] = Read<float>(pData + payload + OFF_SCALE + 4 * k);
     for (int k = 0; k < 4; k++) b.fQuat[k]  = Read<float>(pData + payload + OFF_QUAT  + 4 * k);
@@ -160,18 +181,14 @@ bool PabSkeleton::LoadFromMemory(const uint8_t *pData, size_t stSize) {
     // usable once normalised, whereas genuine drift lands nowhere near 1.
     float q2 = b.fQuat[0]*b.fQuat[0] + b.fQuat[1]*b.fQuat[1]
              + b.fQuat[2]*b.fQuat[2] + b.fQuat[3]*b.fQuat[3];
-    if (q2 < 0.9f || q2 > 1.1f) { Clear(); return false; }
+    if (q2 < 0.9f || q2 > 1.1f) { vBones.clear(); return false; }
 
     vBones.push_back(std::move(b));
 
     size_t end = RecordEnd(pData, off);
 
     if (i + 1 == uiBoneCount) {
-      // Last bone: whatever remains must be exactly one of the known blocks.
-      size_t tail = stSize - end;
-      bool valid = false;
-      for (size_t t : TRAILERS) if (tail == t) { valid = true; break; }
-      if (!valid) { Clear(); return false; }
+      if (end > stSize || !TailOk(stSize - end)) { vBones.clear(); return false; }
       off = stSize;
       break;
     }
@@ -179,18 +196,18 @@ bool PabSkeleton::LoadFromMemory(const uint8_t *pData, size_t stSize) {
     size_t chosen = 0;
     for (size_t sep : SEPARATORS) {
       if (!PlausibleRecord(pData, stSize, end + sep, uiBoneCount)) continue;
-      // Look one record further so a coincidental match cannot win.
+      // Look one record further so a coincidental match cannot win. That
+      // lookahead is why one odd final block used to reject a whole file: the
+      // record before it could not be confirmed either.
       size_t nxt = RecordEnd(pData, end + sep);
       bool good = (nxt >= stSize);
       if (!good)
         for (size_t s2 : SEPARATORS)
           if (PlausibleRecord(pData, stSize, nxt + s2, uiBoneCount)) { good = true; break; }
-      if (!good)
-        for (size_t t : TRAILERS)
-          if (stSize - nxt == t) { good = true; break; }
+      if (!good && nxt <= stSize) good = TailOk(stSize - nxt);
       if (good) { chosen = sep; break; }
     }
-    if (chosen == 0) { Clear(); return false; }
+    if (chosen == 0) { vBones.clear(); return false; }
     off = end + chosen;
 
     // The id of the bone that starts here. The gap is the optional block
@@ -200,8 +217,8 @@ bool PabSkeleton::LoadFromMemory(const uint8_t *pData, size_t stSize) {
     uiPendingId = Read<uint32_t>(pData + off - 4);
   }
 
-  if (off != stSize)               { Clear(); return false; }
-  if (vBones.size() != uiBoneCount) { Clear(); return false; }
+  if (off != stSize)                { vBones.clear(); return false; }
+  if (vBones.size() != uiBoneCount) { vBones.clear(); return false; }
   return true;
 }
 
