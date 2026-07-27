@@ -2272,6 +2272,33 @@ DWORD WINAPI ExtractThread(LPVOID arg) {
 // Model export (OBJ / FBX)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// True when a decoded texture is a normal map stored the swizzled DXT5nm way:
+// X moved into the alpha channel, Y left in green, red pinned at 255. Nearly a
+// third of BDO's normal maps ship like this -- the older object textures --
+// and decoded as-is they come out pink, because red is a flat 255 and the real
+// X is sitting invisibly in alpha.
+//
+// This is decided from the pixels, not from the DDS header. The obvious header
+// route is NVTT's DDPF_NORMAL flag at 0x80000000, and it does not hold up: over
+// all 17,056 normal maps in the archive (tools/dds_survey.cpp) 41 swizzled
+// files leave it clear while 82 perfectly ordinary ones set it, so trusting it
+// would both miss files and wreck good ones.
+//
+// Red pinned at maximum is unambiguous: in a real normal map red carries X and
+// sits near 128, and X = +1 across an entire texture is not a surface. The
+// alpha test guards the degenerate case where there is no X to recover.
+static bool LooksLikeSwizzledNormal(const std::vector<BYTE> &vBgra) {
+  if (vBgra.size() < 4) return false;
+
+  size_t redPinned = 0, alphaPinned = 0;
+  const size_t n = vBgra.size() / 4;
+  for (size_t i = 0; i + 3 < vBgra.size(); i += 4) {
+    if (vBgra[i + 2] >= 250) redPinned++;
+    if (vBgra[i + 3] >= 250) alphaPinned++;
+  }
+  return redPinned > n * 95 / 100 && alphaPinned <= n * 95 / 100;
+}
+
 // Re-encodes an image to PNG at its native resolution. The preview decoder
 // caps textures at 512px, which is fine on screen but would throw away detail
 // in an export.
@@ -2329,9 +2356,31 @@ static bool SaveTextureAsPng(const std::wstring &srcPath, const std::wstring &ds
   WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppBGRA;
   outFrame->SetPixelFormat(&fmt);
 
-  if (SUCCEEDED(outFrame->WriteSource(conv, nullptr)) &&
-      SUCCEEDED(outFrame->Commit()) &&
-      SUCCEEDED(encoder->Commit())) {
+  // Textures big enough to make a full copy expensive are streamed as before.
+  // Nothing that large is a swizzled normal map, so nothing is missed.
+  constexpr UINT64 kMaxAnalysePixels = 32ull * 1024 * 1024;
+
+  bool wrote = false;
+  if (w && h && (UINT64)w * h <= kMaxAnalysePixels) {
+    const UINT stride = w * 4;
+    std::vector<BYTE> px((size_t)stride * h);
+    if (SUCCEEDED(conv->CopyPixels(nullptr, stride, (UINT)px.size(), px.data()))) {
+      if (LooksLikeSwizzledNormal(px)) {
+        // Put X back where every tool expects it. Blue is left at 255 and
+        // alpha dropped, which is the shape the engine's newer normal maps
+        // already have, so both eras come out of here looking the same.
+        for (size_t i = 0; i + 3 < px.size(); i += 4) {
+          px[i + 2] = px[i + 3];   // red   <- alpha (X)
+          px[i + 0] = 255;         // blue  unused, matching the newer maps
+          px[i + 3] = 255;         // alpha opaque
+        }
+      }
+      wrote = SUCCEEDED(outFrame->WritePixels(h, stride, (UINT)px.size(), px.data()));
+    }
+  }
+  if (!wrote) wrote = SUCCEEDED(outFrame->WriteSource(conv, nullptr));
+
+  if (wrote && SUCCEEDED(outFrame->Commit()) && SUCCEEDED(encoder->Commit())) {
     ok = true;
   }
 
