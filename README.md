@@ -19,8 +19,9 @@ A Windows GUI tool for unpacking and extracting files from **Black Desert Online
 - **Search window** — fast non-blocking search across all 800k+ files with live filtering
 - **Update notice** — checks GitHub on startup and shows a clickable link in the status bar when a newer release exists; **Help → Check for Updates** still works on demand
 - **File preview** — inline DDS/PNG/BMP texture preview panel
-- **3D model viewer** — textured preview of `.pam` models with orbit / pan / zoom
+- **3D model viewer** — textured preview of `.pam` models, `.pac` characters and `.pcm` collision hulls, with orbit / pan / zoom
 - **Model export** — export any `.pam` to **OBJ** or **FBX**, with textures written alongside as PNG
+- **Character export** — rigged, skinned characters to **ActorX `.psk`/`.psa`** or **FBX**, with the skeleton found automatically and every animation clip written alongside
 - **Resizable layout** — drag the splitter between the file tree and the preview
 - **Cache** — binary cache (v2) for fast startup; embeds folder path for multi-installation support
 - Multi-language support (English, Japanese, Korean)
@@ -59,14 +60,14 @@ are supported.
 
 Exports are verified to import into **Blender**, **3ds Max** and **Unreal Engine 5**.
 
-### Characters: skeletons, skinning and animation
+### Characters: skeletons, skinning and animation (v2.6.0)
 
 The rest of the `PAR ` family was reverse engineered too, so a character comes
 out complete rather than as a static pose:
 
 | File | What it holds | Exports as |
 |---|---|---|
-| `.pac` | Skinned character mesh, with a bone palette | FBX (skinned) or ActorX `.psk` |
+| `.pac` | Skinned character mesh, with a bone palette | ActorX `.psk` (default) or FBX |
 | `.pab` | Skeleton — bone hierarchy and rest pose | FBX |
 | `.paa` | One animation clip | FBX, or a shared `.psa` |
 | `.pcm` | Collision hull | OBJ or FBX |
@@ -75,6 +76,25 @@ Exporting a `.pac` also pulls its textures out of the archive, and offers to
 write the character's animation clips alongside it — a creature has a couple of
 dozen, a playable class several thousand, so it asks first and tells you how
 many.
+
+A `.pac` does not name its own skeleton, so the right `.pab` is found for you:
+the archive's naming convention is tried first, then the skeletons nearest the
+mesh in the folder tree, and whichever one actually accounts for the mesh's
+bones wins. Across the whole archive **92,236 of 92,498 character meshes**
+resolve a complete skin this way.
+
+#### Normal maps
+
+BDO ships normal maps in two layouts. The newer ones are ordinary: X in red,
+Y in green. The older object textures are **DXT5nm** — X is moved into the alpha
+channel and red is left at a flat 255 — which is why copying one out verbatim
+gives a pink, unusable image. Roughly a third of the archive's normal maps are
+like this.
+
+Exported normal maps are checked and converted, so both eras come out in the
+form every tool expects. The check reads the pixels rather than the DDS header
+flag that nominally marks them, because over all 17,056 normal maps that flag
+is wrong in both directions.
 
 #### Getting a character into Unreal Engine 5
 

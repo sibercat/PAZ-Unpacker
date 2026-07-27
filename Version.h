@@ -12,10 +12,10 @@
 // in one place. Keep it free of C++ so rc.exe can parse it.
 
 #define APP_VERSION_MAJOR 2
-#define APP_VERSION_MINOR 5
+#define APP_VERSION_MINOR 6
 #define APP_VERSION_PATCH 0
 
-#define APP_VERSION_A     "2.5.0"
+#define APP_VERSION_A     "2.6.0"
 #define APP_VERSION       L"" APP_VERSION_A
 
 #endif
