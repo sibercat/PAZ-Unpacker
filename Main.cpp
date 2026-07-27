@@ -2483,56 +2483,157 @@ struct ExportParams {
   kukdh1::PamExportFormat format;
 };
 
+static std::string LowerCopy(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return (char)::tolower(c); });
+  return s;
+}
+
+// The mesh's prefix: the text up to the first underscore of its file name.
+static std::string ModelPrefix(const std::string &sPath) {
+  size_t slash = sPath.rfind('/');
+  std::string base = (slash != std::string::npos) ? sPath.substr(slash + 1) : sPath;
+  size_t us = base.find('_');
+  if (us == std::string::npos || us == 0) return std::string();
+  return LowerCopy(base.substr(0, us));
+}
+
 // A .pac names no skeleton, but the archive lays them out by convention:
 //   character/model/1_pc/11_pgw/armor/9_upperbody/pgw_00_ub_0001.pac
 //   character/model/1_pc/11_pgw/pgw_01.pab
-// so the rig is the .pab whose name starts with the mesh's prefix -- the text
-// up to the first underscore. Prefer <prefix>_01.pab, which is the base rig.
-static kukdh1::Tree *FindSkeletonFor(const std::string &sPacPath) {
-  size_t slash = sPacPath.rfind('/');
-  std::string base = (slash != std::string::npos) ? sPacPath.substr(slash + 1) : sPacPath;
-  size_t us = base.find('_');
-  if (us == std::string::npos || us == 0) return nullptr;
+// so the rig is usually the .pab sharing the mesh's prefix, preferring
+// <prefix>_01.pab. That is the first candidate here.
+//
+// The convention is not universal, though: a cash-shop bird ships as
+//   12_cash/c0074_longtailedtit/m0358_longtailedtit_0001.pac
+//   12_cash/c0074_longtailedtit/c0074_0001.pab
+// where the prefix names a rig that exists elsewhere and is the wrong one. So
+// the skeletons sitting at or above the mesh's own folder follow as fallbacks,
+// nearest first, and the caller keeps the first that actually fits the mesh.
+static std::vector<kukdh1::Tree *> SkeletonCandidatesFor(const std::string &sPacPath) {
+  std::vector<kukdh1::Tree *> out;
+  auto Add = [&out](kukdh1::Tree *n) {
+    if (n && std::find(out.begin(), out.end(), n) == out.end()) out.push_back(n);
+  };
 
-  std::string prefix = base.substr(0, us);
-  std::transform(prefix.begin(), prefix.end(), prefix.begin(),
-                 [](unsigned char c) { return (char)::tolower(c); });
+  const std::string prefix = ModelPrefix(sPacPath);
 
-  kukdh1::Tree *best = nullptr;
+  // Every .pab in the archive, grouped by the folder it lives in.
+  std::vector<kukdh1::Tree *> pabs;
+  std::unordered_map<std::string, std::vector<kukdh1::Tree *>> byDir;
   for (kukdh1::Tree *n : GetCachedFileNodes()) {
     const std::string &p = n->GetFileInfo().sFullPath;
     if (p.size() < 5 || p.compare(p.size() - 4, 4, ".pab") != 0) continue;
+    pabs.push_back(n);
     size_t s = p.rfind('/');
-    std::string b = (s != std::string::npos) ? p.substr(s + 1) : p;
-    std::transform(b.begin(), b.end(), b.begin(),
-                   [](unsigned char c) { return (char)::tolower(c); });
-    if (b.compare(0, prefix.size(), prefix) != 0) continue;
-    if (b.size() <= prefix.size() || b[prefix.size()] != '_') continue;
-    if (b == prefix + "_01.pab") return n;      // the base rig, done
-    if (!best) best = n;
+    byDir[LowerCopy(s != std::string::npos ? p.substr(0, s) : std::string())].push_back(n);
   }
-  return best;
+
+  // The conventional pick, which is right for the overwhelming majority.
+  if (!prefix.empty()) {
+    kukdh1::Tree *best = nullptr;
+    for (kukdh1::Tree *n : pabs) {
+      std::string b = LowerCopy(n->GetFileInfo().sFullPath);
+      size_t s = b.rfind('/');
+      if (s != std::string::npos) b = b.substr(s + 1);
+      if (b.compare(0, prefix.size(), prefix) != 0) continue;
+      if (b.size() <= prefix.size() || b[prefix.size()] != '_') continue;
+      if (b == prefix + "_01.pab") { best = n; break; }   // the base rig
+      if (!best) best = n;
+    }
+    Add(best);
+  }
+
+  // Then walk up from the mesh's own folder.
+  std::string d = LowerCopy(sPacPath);
+  size_t s = d.rfind('/');
+  d = (s != std::string::npos) ? d.substr(0, s) : std::string();
+  while (!d.empty()) {
+    auto it = byDir.find(d);
+    if (it != byDir.end()) {
+      if (!prefix.empty()) {
+        for (kukdh1::Tree *n : it->second) {
+          std::string b = LowerCopy(n->GetFileInfo().sFullPath);
+          size_t s2 = b.rfind('/');
+          if (s2 != std::string::npos) b = b.substr(s2 + 1);
+          if (b == prefix + "_01.pab") Add(n);
+        }
+      }
+      for (kukdh1::Tree *n : it->second) Add(n);
+    }
+    size_t up = d.rfind('/');
+    if (up == std::string::npos) break;
+    d = d.substr(0, up);
+  }
+  return out;
 }
 
-// Every .paa clip belonging to the same character as a mesh, found by the same
-// prefix convention FindSkeletonFor uses. Clips live under character/motion/
-// rather than character/model/, so only the file name is matched.
+// Loads the first candidate skeleton that accounts for every bone id the mesh
+// or clip refers to. Binding to a rig that only half fits produces a mangled
+// skin rather than an error, so a candidate that covers everything is worth
+// the extra extraction; if none does, the conventional pick is returned so the
+// caller still reports the honest "N of M entries are not in this skeleton".
+// sChosenPath reports which .pab won, because the clips belong to the rig
+// rather than to the mesh -- see FindAnimationsFor.
+static bool LoadBestSkeleton(const std::vector<kukdh1::Tree *> &cands,
+                             const std::vector<uint32_t> &vIds,
+                             kukdh1::Crypt &cipher, const std::wstring &wsTempDir,
+                             kukdh1::PabSkeleton &skel, std::string &sChosenPath) {
+  if (cands.empty()) return false;
+
+  const std::wstring temp = wsTempDir + L"paz_export_skel.pab";
+  bool haveFallback = false;
+  kukdh1::PabSkeleton fallback;
+  std::string fallbackPath;
+
+  for (kukdh1::Tree *n : cands) {
+    kukdh1::PabSkeleton s;
+    const bool okLoad = ExtractFile(temp, n->GetFileInfo(), cipher) && s.Load(temp);
+    DeleteFile(temp.c_str());
+    if (!okLoad || s.IsEmpty()) continue;
+
+    bool fits = true;
+    for (uint32_t id : vIds)
+      if (s.FindBoneById(id) < 0) { fits = false; break; }
+    if (fits) {
+      skel        = std::move(s);
+      sChosenPath = n->GetFileInfo().sFullPath;
+      return true;
+    }
+
+    if (!haveFallback) {
+      fallback     = std::move(s);
+      fallbackPath = n->GetFileInfo().sFullPath;
+      haveFallback = true;
+    }
+  }
+
+  if (haveFallback) {
+    skel        = std::move(fallback);
+    sChosenPath = fallbackPath;
+    return true;
+  }
+  return false;
+}
+
+// Every .paa clip belonging to a rig, matched by the prefix of the .pab's own
+// file name. Clips live under character/motion/ rather than character/model/,
+// so only the file name is matched.
+//
+// Keying on the SKELETON rather than the mesh matters wherever the two are
+// named differently: the cash-shop bird m0358_longtailedtit_0001.pac rides
+// c0074_0001.pab and its clips are c0074_*, so going by the mesh finds none at
+// all. For an ordinary character both names share a prefix and nothing changes.
 //
 // Counts vary enormously -- a summon has a couple of dozen, a playable class
 // has a few thousand -- which is why the caller confirms before writing them.
-static std::vector<kukdh1::Tree *> FindAnimationsFor(const std::string &sPacPath,
+static std::vector<kukdh1::Tree *> FindAnimationsFor(const std::string &sPabPath,
                                                      uint64_t &ullTotalBytes) {
   std::vector<kukdh1::Tree *> out;
   ullTotalBytes = 0;
 
-  size_t slash = sPacPath.rfind('/');
-  std::string base = (slash != std::string::npos) ? sPacPath.substr(slash + 1) : sPacPath;
-  size_t us = base.find('_');
-  if (us == std::string::npos || us == 0) return out;
-
-  std::string prefix = base.substr(0, us);
-  std::transform(prefix.begin(), prefix.end(), prefix.begin(),
-                 [](unsigned char c) { return (char)::tolower(c); });
+  const std::string prefix = ModelPrefix(sPabPath);
+  if (prefix.empty()) return out;
 
   for (kukdh1::Tree *n : GetCachedFileNodes()) {
     const std::string &p = n->GetFileInfo().sFullPath;
@@ -2557,14 +2658,14 @@ static std::vector<kukdh1::Tree *> FindAnimationsFor(const std::string &sPacPath
 // Above kAnimConfirmLimit clips the user is asked first: a playable class has
 // a few thousand, which is several hundred megabytes and not what someone
 // exporting one creature expects.
-static std::wstring ExportCharacterAnimations(const std::string &sPacPath,
+static std::wstring ExportCharacterAnimations(const std::string &sPabPath,
                                               const kukdh1::PabSkeleton &skel,
                                               const std::wstring &wsMeshPath,
                                               kukdh1::Crypt &cipher) {
   constexpr size_t kAnimConfirmLimit = 25;
 
   uint64_t ullBytes = 0;
-  std::vector<kukdh1::Tree *> clips = FindAnimationsFor(sPacPath, ullBytes);
+  std::vector<kukdh1::Tree *> clips = FindAnimationsFor(sPabPath, ullBytes);
   if (clips.empty()) return L"\r\n\r\nNo animation clips were found for this character.";
 
   if (clips.size() > kAnimConfirmLimit) {
@@ -2646,12 +2747,12 @@ static std::wstring ExportCharacterAnimations(const std::string &sPacPath,
 // Writes every clip belonging to a character into one .psa beside the .psk.
 // Unlike the FBX path this is a single file, because .psa stores the bone table
 // once and appends sequences, so there is no per-clip overhead to weigh up.
-static std::wstring ExportCharacterPsa(const std::string &sPacPath,
+static std::wstring ExportCharacterPsa(const std::string &sPabPath,
                                        const kukdh1::PabSkeleton &skel,
                                        const std::wstring &wsPskPath,
                                        kukdh1::Crypt &cipher) {
   uint64_t ullBytes = 0;
-  std::vector<kukdh1::Tree *> clips = FindAnimationsFor(sPacPath, ullBytes);
+  std::vector<kukdh1::Tree *> clips = FindAnimationsFor(sPabPath, ullBytes);
   if (clips.empty()) return L"\r\n\r\nNo animation clips were found for this character.";
 
   WCHAR tempDir[MAX_PATH];
@@ -2759,14 +2860,15 @@ DWORD WINAPI ExportThread(LPVOID arg) {
     if (!loaded || anim.IsEmpty()) {
       msg = L"The animation clip could not be parsed.";
     }
-    else if (kukdh1::Tree *pSkelNode = FindSkeletonFor(info.sFullPath)) {
-      const kukdh1::FileInfo &sinfo = pSkelNode->GetFileInfo();
-      std::wstring skelTemp = std::wstring(tempDir) + L"paz_export_skel.pab";
-      kukdh1::PabSkeleton skel;
-      bool sok = ExtractFile(skelTemp, sinfo, cipher) && skel.Load(skelTemp);
-      DeleteFile(skelTemp.c_str());
+    else if (std::vector<kukdh1::Tree *> cands = SkeletonCandidatesFor(info.sFullPath);
+             !cands.empty()) {
+      std::vector<uint32_t> ids;
+      ids.reserve(anim.vTracks.size());
+      for (const auto &t : anim.vTracks) ids.push_back(t.uiBoneId);
 
-      if (!sok || skel.IsEmpty()) {
+      kukdh1::PabSkeleton skel;
+      std::string sSkelPath;
+      if (!LoadBestSkeleton(cands, ids, cipher, tempDir, skel, sSkelPath)) {
         msg = L"Found a skeleton for this clip but could not parse it.";
       }
       else {
@@ -2800,14 +2902,11 @@ DWORD WINAPI ExportThread(LPVOID arg) {
       msg = L"The character mesh could not be parsed.\r\n\r\n"
             L"Version 1 .pac files are not supported yet.";
     }
-    else if (kukdh1::Tree *pSkelNode = FindSkeletonFor(info.sFullPath)) {
-      const kukdh1::FileInfo &sinfo = pSkelNode->GetFileInfo();
-      std::wstring skelTemp = std::wstring(tempDir) + L"paz_export_skel.pab";
+    else if (std::vector<kukdh1::Tree *> cands = SkeletonCandidatesFor(info.sFullPath);
+             !cands.empty()) {
       kukdh1::PabSkeleton skel;
-      bool sok = ExtractFile(skelTemp, sinfo, cipher) && skel.Load(skelTemp);
-      DeleteFile(skelTemp.c_str());
-
-      if (!sok || skel.IsEmpty()) {
+      std::string sSkelPath;
+      if (!LoadBestSkeleton(cands, mesh.vBonePalette, cipher, tempDir, skel, sSkelPath)) {
         msg = L"Found a skeleton for this mesh but could not parse it.";
       }
       else {
@@ -2830,7 +2929,7 @@ DWORD WINAPI ExportThread(LPVOID arg) {
               mesh.TotalVertices(), mesh.TotalTriangles(),
               mesh.vSubmeshes.size(), skel.vBones.size(), nDiffuse, nNormal);
             msg = buf;
-            msg += ExportCharacterPsa(info.sFullPath, skel, p->wsPath, cipher);
+            msg += ExportCharacterPsa(sSkelPath, skel, p->wsPath, cipher);
           } else {
             msg = err;
           }
@@ -2850,7 +2949,7 @@ DWORD WINAPI ExportThread(LPVOID arg) {
 
           // The clips are separate files in the archive, so a mesh on its own
           // arrives in an engine with nothing to play. Write them alongside it.
-          msg += ExportCharacterAnimations(info.sFullPath, skel, p->wsPath, cipher);
+          msg += ExportCharacterAnimations(sSkelPath, skel, p->wsPath, cipher);
         } else {
           msg = err;
         }
