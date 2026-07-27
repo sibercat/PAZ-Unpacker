@@ -104,6 +104,7 @@
     <ClCompile Include="PamModel.cpp" />
     <ClCompile Include="PamRender.cpp" />
     <ClCompile Include="PazFile.cpp" />
+    <ClCompile Include="SkeletonMatch.cpp" />
     <ClCompile Include="Setting.cpp" />
     <ClCompile Include="Tree.cpp" />
     <ClCompile Include="xml\pugixml.cpp" />
@@ -122,6 +123,7 @@
     <ClInclude Include="PamModel.h" />
     <ClInclude Include="PamRender.h" />
     <ClInclude Include="PazFile.h" />
+    <ClInclude Include="SkeletonMatch.h" />
     <ClInclude Include="Setting.h" />
     <ClInclude Include="Tree.h" />
     <ClInclude Include="xml\pugiconfig.hpp" />

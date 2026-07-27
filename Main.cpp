@@ -1,5 +1,6 @@
 #include "Main.h"
 #include "Cache.h"
+#include "SkeletonMatch.h"
 #include <cassert>
 #include <dwmapi.h>
 #include <filesystem>
@@ -2532,110 +2533,30 @@ struct ExportParams {
   kukdh1::PamExportFormat format;
 };
 
-static std::string LowerCopy(std::string s) {
-  std::transform(s.begin(), s.end(), s.begin(),
-                 [](unsigned char c) { return (char)::tolower(c); });
-  return s;
-}
-
-// The mesh's prefix: the text up to the first underscore of its file name.
-static std::string ModelPrefix(const std::string &sPath) {
-  size_t slash = sPath.rfind('/');
-  std::string base = (slash != std::string::npos) ? sPath.substr(slash + 1) : sPath;
-  size_t us = base.find('_');
-  if (us == std::string::npos || us == 0) return std::string();
-  return LowerCopy(base.substr(0, us));
-}
-
-// A .pac names no skeleton, but the archive lays them out by convention:
-//   character/model/1_pc/11_pgw/armor/9_upperbody/pgw_00_ub_0001.pac
-//   character/model/1_pc/11_pgw/pgw_01.pab
-// so the rig is usually the .pab sharing the mesh's prefix, preferring
-// <prefix>_01.pab. That is the first candidate here.
-//
-// The convention is not universal, though. Three ways it breaks, all shipping:
-//   12_cash/c0074_longtailedtit/m0358_longtailedtit_0001.pac -> c0074_0001.pab
-//   12_cash/c0030_itemstampoff_01/c0069_horsestampoff_01.pac -> c0030_01.pab
-//   8_housing/h0004_craftingcooking_0001/t0051_..._0001.pac  -> h0003_01.pab
-// The prefix names a rig that exists elsewhere and is the wrong one, and the
-// right one may be beside the mesh or in a *sibling* folder -- the housing
-// cooking station is rigged by the armour station's skeleton. So the remaining
-// candidates are ordered by how much of their path they share with the mesh,
-// and the caller keeps the first that actually fits it.
-static std::vector<kukdh1::Tree *> SkeletonCandidatesFor(const std::string &sPacPath) {
-  std::vector<kukdh1::Tree *> out;
-  auto Add = [&out](kukdh1::Tree *n) {
-    if (n && std::find(out.begin(), out.end(), n) == out.end()) out.push_back(n);
-  };
-
-  const std::string prefix = ModelPrefix(sPacPath);
-
-  std::vector<kukdh1::Tree *> pabs;
+// The archive's .pab paths, in index order, so a ranking can be mapped back
+// onto the tree nodes it came from.
+static std::vector<kukdh1::Tree *> CollectSkeletonNodes(std::vector<std::string> &vOutPaths) {
+  std::vector<kukdh1::Tree *> nodes;
+  vOutPaths.clear();
   for (kukdh1::Tree *n : GetCachedFileNodes()) {
     const std::string &p = n->GetFileInfo().sFullPath;
     if (p.size() < 5 || p.compare(p.size() - 4, 4, ".pab") != 0) continue;
-    pabs.push_back(n);
+    nodes.push_back(n);
+    vOutPaths.push_back(p);
   }
+  return nodes;
+}
 
-  // The conventional pick, which is right for the overwhelming majority and so
-  // is tried first: a mesh that resolves today keeps the rig it already has.
-  if (!prefix.empty()) {
-    kukdh1::Tree *best = nullptr;
-    for (kukdh1::Tree *n : pabs) {
-      std::string b = LowerCopy(n->GetFileInfo().sFullPath);
-      size_t s = b.rfind('/');
-      if (s != std::string::npos) b = b.substr(s + 1);
-      if (b.compare(0, prefix.size(), prefix) != 0) continue;
-      if (b.size() <= prefix.size() || b[prefix.size()] != '_') continue;
-      if (b == prefix + "_01.pab") { best = n; break; }   // the base rig
-      if (!best) best = n;
-    }
-    Add(best);
-  }
+// Candidate rigs for a mesh, best guess first. The ranking itself lives in
+// SkeletonMatch.cpp so that tools/skel_rule_test.cpp exercises the same code
+// the app runs rather than a second copy of the rule.
+static std::vector<kukdh1::Tree *> SkeletonCandidatesFor(const std::string &sPacPath) {
+  std::vector<std::string> paths;
+  std::vector<kukdh1::Tree *> nodes = CollectSkeletonNodes(paths);
 
-  // Leading path components shared with the mesh: same folder scores highest,
-  // then siblings under the same group.
-  const std::string lp = LowerCopy(sPacPath);
-  auto Shared = [&lp](const std::string &sOther) {
-    const std::string q = LowerCopy(sOther);
-    size_t n = 0, i = 0, j = 0;
-    for (;;) {
-      size_t a = lp.find('/', i), b = q.find('/', j);
-      if (a == std::string::npos || b == std::string::npos) break;
-      if (lp.compare(i, a - i, q, j, b - j) != 0) break;
-      n++; i = a + 1; j = b + 1;
-    }
-    return n;
-  };
-
-  // Two components means only "character/model" in common, which is no
-  // relation; ranking the whole archive on that would be guessing. The cap
-  // bounds how many skeletons a failing mesh can make us extract.
-  constexpr size_t kMinShared      = 3;
-  constexpr size_t kMaxCandidates  = 32;
-
-  std::vector<std::pair<size_t, kukdh1::Tree *>> ranked;
-  for (kukdh1::Tree *n : pabs) {
-    size_t s = Shared(n->GetFileInfo().sFullPath);
-    if (s >= kMinShared) ranked.emplace_back(s, n);
-  }
-  std::stable_sort(ranked.begin(), ranked.end(),
-                   [](const auto &a, const auto &b) { return a.first > b.first; });
-
-  // Within the nearest folders the prefix still breaks ties.
-  if (!prefix.empty()) {
-    for (const auto &kv : ranked) {
-      std::string b = LowerCopy(kv.second->GetFileInfo().sFullPath);
-      size_t s = b.rfind('/');
-      if (s != std::string::npos) b = b.substr(s + 1);
-      if (b == prefix + "_01.pab") { Add(kv.second); break; }
-    }
-  }
-
-  for (const auto &kv : ranked) {
-    if (out.size() >= kMaxCandidates) break;
-    Add(kv.second);
-  }
+  std::vector<kukdh1::Tree *> out;
+  for (size_t i : kukdh1::RankSkeletonCandidates(sPacPath, paths))
+    out.push_back(nodes[i]);
   return out;
 }
 
@@ -2703,7 +2624,7 @@ static std::vector<kukdh1::Tree *> FindAnimationsFor(const std::string &sPabPath
   std::vector<kukdh1::Tree *> out;
   ullTotalBytes = 0;
 
-  const std::string prefix = ModelPrefix(sPabPath);
+  const std::string prefix = kukdh1::ModelPrefix(sPabPath);
   if (prefix.empty()) return out;
 
   for (kukdh1::Tree *n : GetCachedFileNodes()) {
