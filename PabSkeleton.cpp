@@ -31,6 +31,13 @@ namespace {
   // The final bone still carries its block, but no id follows it.
   constexpr size_t TRAILERS[]   = { 0, 24, 36, 56, 60 };
 
+  // A dozen vehicle rigs carry far larger blocks -- 208 to 1024 bytes, always a
+  // multiple of 16, so a list of something rather than a fixed struct. Rather
+  // than collect sizes that a later patch would only add to, the fallback pass
+  // scans for the next record. It runs only where every known size has already
+  // failed, so it cannot change a file that parses without it.
+  constexpr size_t MAX_SEPARATOR_SCAN = 4096;
+
   template <typename T>
   T Read(const uint8_t *p) {
     T v;
@@ -113,8 +120,10 @@ bool PabSkeleton::LoadFromMemory(const uint8_t *pData, size_t stSize) {
   if (memcmp(pData, "PAR ", 4) != 0) return false;
   if (pData[4] != TYPE_SKELETON)     return false;
 
+  // 3 is players and 4 monsters; a single object rig ships as 2 and uses the
+  // same record layout, so it is read rather than turned away.
   uiVersion = pData[5];
-  if (uiVersion != 3 && uiVersion != 4) return false;
+  if (uiVersion < 2 || uiVersion > 4) return false;
 
   uint32_t uiBoneCount = Read<uint16_t>(pData + 0x10);
   uiFirstBoneId        = Read<uint32_t>(pData + 0x12);
@@ -193,19 +202,26 @@ bool PabSkeleton::WalkBones(const uint8_t *pData, size_t stSize,
       break;
     }
 
-    size_t chosen = 0;
-    for (size_t sep : SEPARATORS) {
-      if (!PlausibleRecord(pData, stSize, end + sep, uiBoneCount)) continue;
-      // Look one record further so a coincidental match cannot win. That
-      // lookahead is why one odd final block used to reject a whole file: the
-      // record before it could not be confirmed either.
+    // Look one record further so a coincidental match cannot win. That
+    // lookahead is why one odd final block used to reject a whole file: the
+    // record before it could not be confirmed either.
+    auto SeparatorFits = [&](size_t sep) {
+      if (!PlausibleRecord(pData, stSize, end + sep, uiBoneCount)) return false;
       size_t nxt = RecordEnd(pData, end + sep);
-      bool good = (nxt >= stSize);
-      if (!good)
-        for (size_t s2 : SEPARATORS)
-          if (PlausibleRecord(pData, stSize, nxt + s2, uiBoneCount)) { good = true; break; }
-      if (!good && nxt <= stSize) good = TailOk(stSize - nxt);
-      if (good) { chosen = sep; break; }
+      if (nxt > stSize) return false;
+      if (nxt == stSize) return true;
+      for (size_t s2 : SEPARATORS)
+        if (PlausibleRecord(pData, stSize, nxt + s2, uiBoneCount)) return true;
+      return TailOk(stSize - nxt);
+    };
+
+    size_t chosen = 0;
+    for (size_t sep : SEPARATORS)
+      if (SeparatorFits(sep)) { chosen = sep; break; }
+
+    if (!chosen && bLooseTail) {
+      for (size_t sep = 2; sep < MAX_SEPARATOR_SCAN && end + sep < stSize; sep += 2)
+        if (SeparatorFits(sep)) { chosen = sep; break; }
     }
     if (chosen == 0) { vBones.clear(); return false; }
     off = end + chosen;
