@@ -2898,7 +2898,7 @@ DWORD WINAPI ExportThread(LPVOID arg) {
              !cands.empty()) {
       kukdh1::PabSkeleton skel;
       std::string sSkelPath;
-      if (!LoadBestSkeleton(cands, mesh.vBonePalette, cipher, tempDir, skel, sSkelPath)) {
+      if (!LoadBestSkeleton(cands, mesh.UsedBoneIds(), cipher, tempDir, skel, sSkelPath)) {
         msg = L"Found a skeleton for this mesh but could not parse it.";
       }
       else {

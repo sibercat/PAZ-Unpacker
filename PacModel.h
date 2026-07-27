@@ -90,6 +90,15 @@ namespace kukdh1 {
       size_t TotalVertices() const;
       size_t TotalTriangles() const;
 
+      // The palette ids some vertex actually leans on, with a non-zero weight.
+      //
+      // Meshes carry dead slots: pnw_10_hand_0027 has four no vertex touches,
+      // and one of those names a bone that appears in none of the archive's
+      // skeletons. Since nothing is weighted to it, it cannot move a vertex --
+      // so demanding it resolve would refuse an export over a bone that does
+      // not exist and does not matter. Bind against these, not the raw palette.
+      std::vector<uint32_t> UsedBoneIds() const;
+
     private:
       void ComputeNormals(PacSubmesh &sm) const;
       void Clear();

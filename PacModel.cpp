@@ -82,6 +82,20 @@ size_t PacModel::TotalTriangles() const {
   return n;
 }
 
+std::vector<uint32_t> PacModel::UsedBoneIds() const {
+  std::vector<bool> used(vBonePalette.size(), false);
+  for (const auto &sm : vSubmeshes)
+    for (const auto &v : sm.vVertices)
+      for (int k = 0; k < 4; k++)
+        if (v.weight[k] && v.bone[k] < used.size()) used[v.bone[k]] = true;
+
+  std::vector<uint32_t> out;
+  out.reserve(vBonePalette.size());
+  for (size_t i = 0; i < vBonePalette.size(); i++)
+    if (used[i]) out.push_back(vBonePalette[i]);
+  return out;
+}
+
 bool PacModel::Load(const std::wstring &wsPath) {
   std::ifstream f(wsPath, std::ios::binary | std::ios::ate);
   if (!f) return false;

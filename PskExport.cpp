@@ -123,19 +123,23 @@ namespace kukdh1 {
     if (skel.IsEmpty())   { wsError = L"The skeleton has no bones."; return false; }
 
     // Resolve the palette first: binding to the wrong bones is worse than
-    // refusing, and the caller can explain a mismatch.
+    // refusing, and the caller can explain a mismatch. Only the entries some
+    // vertex is actually weighted to have to resolve -- see
+    // PacModel::UsedBoneIds.
     std::vector<int> paletteToBone(model.vBonePalette.size(), -1);
-    size_t unresolved = 0;
-    for (size_t i = 0; i < model.vBonePalette.size(); i++) {
+    for (size_t i = 0; i < model.vBonePalette.size(); i++)
       paletteToBone[i] = skel.FindBoneById(model.vBonePalette[i]);
-      if (paletteToBone[i] < 0) unresolved++;
-    }
+
+    const std::vector<uint32_t> usedIds = model.UsedBoneIds();
+    size_t unresolved = 0;
+    for (uint32_t id : usedIds)
+      if (skel.FindBoneById(id) < 0) unresolved++;
     if (unresolved) {
       wchar_t buf[192];
       swprintf_s(buf,
-        L"%zu of %zu bone palette entries are not in this skeleton.\r\n"
+        L"%zu of %zu weighted bone palette entries are not in this skeleton.\r\n"
         L"The mesh and skeleton probably belong to different characters.",
-        unresolved, model.vBonePalette.size());
+        unresolved, usedIds.size());
       wsError = buf;
       return false;
     }
