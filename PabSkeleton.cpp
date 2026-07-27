@@ -11,25 +11,24 @@ namespace kukdh1 {
 namespace {
 
   constexpr size_t HEADER_SIZE   = 0x16;
+  // The payload proper is 302 bytes; the two that follow it are the head of
+  // whatever comes next. Counting them here keeps the separator table below in
+  // whole units, and every offset used from the payload sits well inside 302.
   constexpr size_t BONE_PAYLOAD  = 304;
   constexpr uint8_t TYPE_SKELETON = 0x01;
 
-  // Field offsets inside the 304-byte payload.
+  // Field offsets inside the payload.
   constexpr size_t OFF_PARENT = 0x000;
   constexpr size_t OFF_SCALE  = 0x104;
   constexpr size_t OFF_QUAT   = 0x110;
   constexpr size_t OFF_TRANS  = 0x120;
-  // Runs to payload+306, i.e. two bytes past BONE_PAYLOAD, which is why the
-  // gap between records is two bytes wider than the payload itself. The value
-  // names the NEXT bone, not this one -- see PabBone::uiBoneId.
-  constexpr size_t OFF_BONEID = 0x12E;
 
-  // Bytes between the end of one payload and the start of the next record:
-  // a fixed 2-byte gap, plus an optional 24/36/56/60-byte block. The flag
-  // bytes cannot tell 24 from 60 apart, so the correct value is found by
-  // validating the record that follows.
+  // Bytes between the end of one payload and the start of the next record: an
+  // optional 24/36/56/60-byte block, then the next bone's 4-byte id, less the
+  // two already counted above. The flag bytes cannot tell 24 from 60 apart, so
+  // the correct value is found by validating the record that follows.
   constexpr size_t SEPARATORS[] = { 2, 26, 38, 58, 62 };
-  // The final bone has no separator but may still carry the optional block.
+  // The final bone still carries its block, but no id follows it.
   constexpr size_t TRAILERS[]   = { 0, 24, 36, 56, 60 };
 
   template <typename T>
@@ -126,6 +125,12 @@ bool PabSkeleton::LoadFromMemory(const uint8_t *pData, size_t stSize) {
 
   vBones.reserve(uiBoneCount);
 
+  // A bone's id is the 4 bytes immediately preceding its record, so bone 0
+  // takes the header field and every later bone takes the tail of the gap that
+  // separates it from the bone before. Carrying it forward is what keeps the
+  // id with the bone it names.
+  uint32_t uiPendingId = uiFirstBoneId;
+
   size_t off = HEADER_SIZE;
   for (uint32_t i = 0; i < uiBoneCount; i++) {
     if (!PlausibleRecord(pData, stSize, off, uiBoneCount)) { Clear(); return false; }
@@ -146,11 +151,7 @@ bool PabSkeleton::LoadFromMemory(const uint8_t *pData, size_t stSize) {
     for (int k = 0; k < 4; k++) b.fQuat[k]  = Read<float>(pData + payload + OFF_QUAT  + 4 * k);
     for (int k = 0; k < 3; k++) b.fTrans[k] = Read<float>(pData + payload + OFF_TRANS + 4 * k);
 
-    // This names the NEXT bone; it is shifted into place after the loop. The
-    // last record stops two bytes short of it, and that value would belong to
-    // a bone that does not exist, so reading nothing there is correct.
-    b.uiBoneId = (payload + OFF_BONEID + 4 <= stSize)
-               ? Read<uint32_t>(pData + payload + OFF_BONEID) : 0;
+    b.uiBoneId = uiPendingId;
 
     // A non-normal quaternion means the offsets have drifted; that is the
     // cheapest reliable check that this record was read at the right place.
@@ -191,21 +192,16 @@ bool PabSkeleton::LoadFromMemory(const uint8_t *pData, size_t stSize) {
     }
     if (chosen == 0) { Clear(); return false; }
     off = end + chosen;
+
+    // The id of the bone that starts here. The gap is the optional block
+    // followed by these 4 bytes, so reading at a fixed offset inside the
+    // payload only lands on the id when no block is present -- which is why
+    // rigs that mix the two used to lose exactly their blocked bones.
+    uiPendingId = Read<uint32_t>(pData + off - 4);
   }
 
   if (off != stSize)               { Clear(); return false; }
   if (vBones.size() != uiBoneCount) { Clear(); return false; }
-
-  // Shift the ids onto the bones they actually name. Each record carries the
-  // following bone's id, so bone 0 takes the header field and every other
-  // bone takes the value read from the record before it. The value trailing
-  // the last record -- if the file even reaches it -- is dropped.
-  uint32_t carry = uiFirstBoneId;
-  for (auto &b : vBones) {
-    const uint32_t next = b.uiBoneId;
-    b.uiBoneId = carry;
-    carry      = next;
-  }
   return true;
 }
 

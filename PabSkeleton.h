@@ -20,14 +20,14 @@ namespace kukdh1 {
   //    0x05  uint8     version: 3 (player) or 4 (monster) — same layout
   //    0x06  uint8[10] 00 01 02 03 04 05 06 07 08 09 (constant descriptor)
   //    0x10  uint16    bone count
-  //    0x12  uint32    the FIRST bone's id — see uiBoneId below; the ids run
-  //                    one record ahead of the bones they name
+  //    0x12  uint32    the FIRST bone's id — see uiBoneId below; every other
+  //                    bone's id sits just before its own record
   //
   //  Bone record @0x16, one per bone, in hierarchy order (a parent always
   //  precedes its children, so a single forward pass can compose transforms)
   //    uint8     name length
   //    char[]    name, CP949 (Korean) — converted to UTF-8 on load
-  //    304 bytes payload:
+  //    302 bytes payload:
   //      +0x000  int32     parent index, -1 for the root
   //      +0x004  float[16] matrix A  ─┐ bind / inverse-bind pairs; not needed
   //      +0x044  float[16] matrix B   │ for export because the SRT triple
@@ -36,13 +36,21 @@ namespace kukdh1 {
   //      +0x104  float[3]  scale
   //      +0x110  float[4]  rotation quaternion (x, y, z, w)
   //      +0x120  float[3]  translation
-  //      +0x12C  uint8[4]  flags
+  //      +0x12C  uint8[2]  flags
+  //    0/24/36/56/60 bytes  optional block, present per the flags
+  //    uint32    the id of the NEXT bone (absent after the last record, which
+  //              instead ends the file two bytes past its block)
   //
-  //  Records are separated by 2 bytes, and a bone may carry one of several
-  //  optional trailing blocks (24, 36, 56 or 60 bytes). The flag bytes at
-  //  +0x12C signal that a block is present but do not distinguish 24 from 60,
-  //  so the reader picks the separator by validating the following record.
-  //  The blocks hold no data needed for a skeleton, so they are skipped.
+  //  The flags say a block is there but not how big, so the reader picks the
+  //  size by validating the record that follows. The blocks hold no data a
+  //  skeleton needs, so they are skipped -- but the id must be read at the far
+  //  side of the block, not at a fixed offset from the payload. Reading it at
+  //  a fixed offset silently returns padding for exactly the bones that carry
+  //  a block, which is how ~10% of rigs lost part of their palette.
+  //
+  //  PabSkeleton.cpp folds the first two bytes after the payload into its
+  //  BONE_PAYLOAD constant, so the separators it searches are these block
+  //  sizes plus two.
   //
   //  The SRT triple is LOCAL — parent-relative. Verified by composing it down
   //  the hierarchy of a player rig: feet land at y≈15, pelvis y≈99 and head
@@ -65,12 +73,10 @@ namespace kukdh1 {
     // palette entries against this field. A .paa animation track names its
     // target bone the same way.
     //
-    // The ids are stored one record AHEAD of the bone they belong to: the
-    // header field at 0x12 is bone 0's id, and the four bytes at payload+302
-    // of record i are bone i+1's. That is also why a record's payload appears
-    // to overrun by two bytes into the inter-record gap, and why the last
-    // record is two bytes short -- there is no further bone to name, so the
-    // file simply stops.
+    // An id is stored immediately BEFORE the record it names: bone 0 takes the
+    // header field at 0x12, and every later bone takes the four bytes ending
+    // where its own record starts. Nothing follows the last record, because
+    // there is no further bone to name.
     uint32_t    uiBoneId;
   };
 
