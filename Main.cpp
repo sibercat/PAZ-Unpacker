@@ -3108,13 +3108,14 @@ void ExportSelectedModel(HWND hWnd, kukdh1::Tree *pTree) {
   const COMDLG_FILTERSPEC fbxFilters[] = {
     { L"Autodesk FBX (*.fbx)",   L"*.fbx" },
   };
-  // A character mesh can also go out as ActorX. Worth offering because the
-  // format is unambiguous where FBX is not: 3ds Max reads a .psk as a real
-  // bone hierarchy with a working Skin modifier, and the .psa carries every
-  // clip in one file.
+  // A character mesh leads with ActorX rather than FBX. The format is
+  // unambiguous where FBX is not: 3ds Max reads a .psk as a real bone
+  // hierarchy with a working Skin modifier, the .psa carries every clip in one
+  // file, and it is the only route that gets animation into Unreal (see the
+  // README). FBX stays available for anyone going straight to Blender.
   const COMDLG_FILTERSPEC charFilters[] = {
-    { L"Autodesk FBX (*.fbx)",         L"*.fbx" },
     { L"ActorX mesh (*.psk)",          L"*.psk" },
+    { L"Autodesk FBX (*.fbx)",         L"*.fbx" },
   };
 
   std::wstring startDir;
@@ -3133,15 +3134,16 @@ void ExportSelectedModel(HWND hWnd, kukdh1::Tree *pTree) {
 
   UINT filterIndex = 1;
   std::wstring outPath;
+  const wchar_t *suggestExt = isSkinned ? L".psk" : fbxOnly ? L".fbx" : L".obj";
   if (!kukdh1::SaveFileDialog(hWnd, title,
-                              (wBase + (fbxOnly ? L".fbx" : L".obj")).c_str(),
+                              (wBase + suggestExt).c_str(),
                               filters, nFilters,
                               startDir.c_str(), filterIndex, outPath))
     return;
 
   kukdh1::PamExportFormat fmt;
-  if (isSkinned)     fmt = (filterIndex == 2) ? kukdh1::PAM_EXPORT_PSK
-                                              : kukdh1::PAM_EXPORT_FBX;
+  if (isSkinned)     fmt = (filterIndex == 2) ? kukdh1::PAM_EXPORT_FBX
+                                              : kukdh1::PAM_EXPORT_PSK;
   else if (fbxOnly)  fmt = kukdh1::PAM_EXPORT_FBX;
   else               fmt = (filterIndex == 2) ? kukdh1::PAM_EXPORT_FBX
                                               : kukdh1::PAM_EXPORT_OBJ;
