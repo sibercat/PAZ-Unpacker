@@ -80,8 +80,16 @@ many.
 A `.pac` does not name its own skeleton, so the right `.pab` is found for you:
 the archive's naming convention is tried first, then the skeletons nearest the
 mesh in the folder tree, and whichever one actually accounts for the mesh's
-bones wins. Across the whole archive **92,236 of 92,498 character meshes**
-resolve a complete skin this way.
+bones wins.
+
+A few meshes carry their own skeleton instead — the newer `_0033` weapons, the
+backpack pets, and some monster and mount wings (v2.6.1). Those are bound to
+it, with their own animation clips. The file stores no bone names, so names are
+borrowed from nearby skeletons where the bones match and numbered otherwise.
+
+Across the whole archive **96,836 of 97,150 character meshes** resolve a
+complete skin. Another 493 `.pac` files are empty placeholders the game uses to
+hide a part; the app says so rather than calling them unreadable.
 
 #### Normal maps
 
