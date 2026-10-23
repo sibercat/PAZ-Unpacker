@@ -2,8 +2,10 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <unordered_set>
 
 namespace kukdh1 {
 
@@ -17,6 +19,16 @@ namespace {
   constexpr size_t V_UV     = 0x10;
   constexpr size_t V_BONE   = 0x18;
   constexpr size_t V_WEIGHT = 0x1C;
+
+  // Embedded bone record (see PacModel.h): a uint32 id, then the same payload
+  // a .pab bone carries. The last byte says whether a further 36-byte block
+  // follows; only 0 and 1 occur in the archive.
+  constexpr size_t EMBEDDED_BONE_SIZE  = 306;
+  constexpr size_t EMBEDDED_BONE_EXTRA = 36;
+  constexpr size_t EB_PARENT = 0x004;
+  constexpr size_t EB_SCALE  = 0x108;
+  constexpr size_t EB_QUAT   = 0x114;
+  constexpr size_t EB_TRANS  = 0x124;
 
   template <typename T>
   T Read(const uint8_t *p) {
@@ -55,12 +67,14 @@ namespace {
 
 }  // namespace
 
-PacModel::PacModel() : uiVersion(0) {}
+PacModel::PacModel() : uiVersion(0), bPlaceholder(false) {}
 
 void PacModel::Clear() {
   vBonePalette.clear();
   vSubmeshes.clear();
-  uiVersion = 0;
+  vEmbeddedBones.clear();
+  uiVersion    = 0;
+  bPlaceholder = false;
 }
 
 bool PacModel::IsEmpty() const {
@@ -124,6 +138,43 @@ bool PacModel::LoadFromMemory(const uint8_t *pData, size_t stSize) {
   // immediately after at 0x11 (unaligned, as elsewhere in this family);
   // versions 2 and 3 put it at 0x14.
   size_t off = (uiVersion == 1) ? 0x10 : 0x14;
+
+  // Versions 2 and 3: a 1 at 0x10 means a table of the mesh's own bones sits
+  // between it and the palette. Any other nonzero value has never been seen,
+  // so refuse it rather than guess.
+  if (uiVersion != 1) {
+    const uint32_t hasBones = Read<uint32_t>(pData + 0x10);
+    if (hasBones > 1) { Clear(); return false; }
+    if (hasBones == 1) {
+      const uint32_t boneCount = Read<uint32_t>(pData + 0x14);
+      off = 0x18;
+      for (uint32_t i = 0; i < boneCount; i++) {
+        if (off + EMBEDDED_BONE_SIZE > stSize) { Clear(); return false; }
+        const uint8_t extra = pData[off + EMBEDDED_BONE_SIZE - 1];
+        if (extra > 1) { Clear(); return false; }
+
+        // Same payload as a .pab bone, so the same checks apply: parents
+        // precede children, and a quaternion far from unit length means the
+        // record was read at the wrong place.
+        PabBone b;
+        b.uiBoneId = Read<uint32_t>(pData + off);
+        b.iParent  = Read<int32_t>(pData + off + EB_PARENT);
+        if (b.iParent >= (int32_t)i)       { Clear(); return false; }
+        if (i == 0 && b.iParent != -1)     { Clear(); return false; }
+        for (int k = 0; k < 3; k++) b.fScale[k] = Read<float>(pData + off + EB_SCALE + 4 * k);
+        for (int k = 0; k < 4; k++) b.fQuat[k]  = Read<float>(pData + off + EB_QUAT  + 4 * k);
+        for (int k = 0; k < 3; k++) b.fTrans[k] = Read<float>(pData + off + EB_TRANS + 4 * k);
+        const float q2 = b.fQuat[0]*b.fQuat[0] + b.fQuat[1]*b.fQuat[1]
+                       + b.fQuat[2]*b.fQuat[2] + b.fQuat[3]*b.fQuat[3];
+        if (q2 < 0.9f || q2 > 1.1f)        { Clear(); return false; }
+        vEmbeddedBones.push_back(std::move(b));
+
+        off += EMBEDDED_BONE_SIZE + extra * EMBEDDED_BONE_EXTRA;
+      }
+    }
+  }
+
+  if (off >= stSize) { Clear(); return false; }
   const size_t paletteCount = pData[off++];
   if (off + 4 * paletteCount > stSize) { Clear(); return false; }
   vBonePalette.reserve(paletteCount);
@@ -139,13 +190,16 @@ bool PacModel::LoadFromMemory(const uint8_t *pData, size_t stSize) {
   off += 8;                               // two unknown uint32s
   const size_t submeshCount = Read<uint16_t>(pData + off);
   off += 2;
-  if (submeshCount == 0) { Clear(); return false; }
+  // A well-formed file with no geometry: a stand-in the game swaps in to
+  // hide a part. Nothing to load, but say so rather than call it unreadable.
+  if (submeshCount == 0) { Clear(); bPlaceholder = true; return false; }
 
   vSubmeshes.reserve(submeshCount);
   for (size_t s = 0; s < submeshCount; s++) {
     if (off >= stSize) { Clear(); return false; }
     const size_t nameLen = pData[off];
-    if (nameLen == 0 || nameLen > 64)             { Clear(); return false; }
+    // Empty names do occur (prsa_10_cloak_0050_dm_w's second submesh).
+    if (nameLen > 64)                             { Clear(); return false; }
     if (off + 1 + nameLen + 2 > stSize)           { Clear(); return false; }
     for (size_t i = 0; i < nameLen; i++)
       if (pData[off + 1 + i] < 0x20)              { Clear(); return false; }
@@ -287,6 +341,35 @@ void PacModel::ComputeNormals(PacSubmesh &sm) const {
     if (len > 1e-12f) { v.nx /= len; v.ny /= len; v.nz /= len; }
     else              { v.nx = 0.0f; v.ny = 1.0f; v.nz = 0.0f; }
   }
+}
+
+bool PacEmbeddedSkeleton(const PacModel &src,
+                         const std::unordered_map<uint32_t, std::string> &vNames,
+                         PabSkeleton &dst) {
+  dst = PabSkeleton();
+  if (src.vEmbeddedBones.empty()) return false;
+
+  dst.vBones        = src.vEmbeddedBones;
+  dst.uiFirstBoneId = dst.vBones[0].uiBoneId;
+
+  std::unordered_set<std::string> taken;
+  for (size_t i = 0; i < dst.vBones.size(); i++) {
+    PabBone &b = dst.vBones[i];
+    auto it = vNames.find(b.uiBoneId);
+    if (it != vNames.end() && !it->second.empty() && taken.insert(it->second).second) {
+      b.sName = it->second;
+      continue;
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Bone_%03zu", i);
+    b.sName = buf;
+    if (!taken.insert(b.sName).second) {        // a borrowed name got there first
+      snprintf(buf, sizeof(buf), "Bone_%03zu_%08X", i, b.uiBoneId);
+      b.sName = buf;
+      taken.insert(b.sName);
+    }
+  }
+  return true;
 }
 
 }  // namespace kukdh1

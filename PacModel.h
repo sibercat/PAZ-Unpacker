@@ -5,9 +5,11 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "PamModel.h"
+#include "PabSkeleton.h"
 
 namespace kukdh1 {
 
@@ -21,8 +23,23 @@ namespace kukdh1 {
   //
   //    All three versions share this shape; only where the palette starts
   //    differs. Version 1 puts the count at 0x10 and the palette at 0x11,
-  //    unaligned. Versions 2 and 3 put the count at 0x14, with four bytes of
-  //    something else at 0x10.
+  //    unaligned. Versions 2 and 3 put the count at 0x14, with a uint32 at
+  //    0x10 that is normally 0.
+  //
+  //    When that uint32 is 1, the mesh carries its own bones and the palette
+  //    count moves past them:
+  //      0x14  uint32    bone count
+  //      0x18  record[bone count], 306 bytes each:
+  //              uint32    bone id (same id space as PabBone::uiBoneId)
+  //              int32     parent index, -1 for the root
+  //              float[4][4] x 4  local, inverse local, bind, inverse bind
+  //              float[10] scale, rotation quaternion, translation
+  //              uint8     unknown
+  //              uint8     1 if a further 36 bytes follow the record
+  //    Seen on 144 meshes, all ending on the usual 25-byte trailer: every
+  //    class's _0033 weapon, the smallnom/smallpet backpack pets, some
+  //    monster and mount wings, and pkow_tail_01. No archive .pab covers
+  //    them; the table is their rig -- see PacEmbeddedSkeleton().
   //
   //          uint8     bone palette count
   //          uint32[]  bone palette -- see below
@@ -32,8 +49,11 @@ namespace kukdh1 {
   //          uint32    unknown
   //          uint16    submesh count
   //
+  //  A submesh count of 0 is a placeholder: 493 files (pgw_10_hel_0031_haircut
+  //  and the like) hold an empty bounding box and nothing else.
+  //
   //  Submesh[submesh count]
-  //    uint8     name length
+  //    uint8     name length, occasionally 0
   //    char[]    name
   //    uint16    unknown
   //    3 x LOD, highest detail first:
@@ -80,6 +100,12 @@ namespace kukdh1 {
       std::vector<uint32_t>   vBonePalette;   // palette slot -> PabBone::uiBoneId
       std::vector<PacSubmesh> vSubmeshes;
       uint32_t                uiVersion;
+      bool                    bPlaceholder;     // parsed, zero submeshes;
+                                                // Load still returns false
+
+      // The mesh's own bones, when it carries them (see above). Names are
+      // empty: the file stores none.
+      std::vector<PabBone>    vEmbeddedBones;
 
       PacModel();
 
@@ -116,6 +142,20 @@ namespace kukdh1 {
   // archive's naming convention (see PacModel above), so the existing
   // by-name texture lookup resolves a character mesh unchanged.
   bool PacToPamModel(const PacModel &src, PamModel &dst);
+
+  // Turns a mesh's own bone table into a skeleton the exporters can bind to.
+  //
+  // A mesh that carries one is bound to it, not to a .pab: no archive rig
+  // covers these meshes, and where a .pab shares a bone with one its bind pose
+  // can sit a metre away (the weapon is posed for its own rig, not the
+  // class's). The file stores no names, so each bone takes the name vNames
+  // gives its id -- borrowed from nearby .pab files -- or "Bone_<index>".
+  // Names stay unique; a borrowed one already taken falls back too.
+  //
+  // Returns false when the mesh carries no table.
+  bool PacEmbeddedSkeleton(const PacModel &src,
+                           const std::unordered_map<uint32_t, std::string> &vNames,
+                           PabSkeleton &dst);
 
 }
 

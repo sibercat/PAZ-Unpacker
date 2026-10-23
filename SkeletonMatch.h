@@ -45,6 +45,34 @@ namespace kukdh1 {
   // mesh.
   std::string ModelPrefix(const std::string &sPath);
 
+  // Clips worth reading for a mesh that carries its own rig
+  // (PacModel::vEmbeddedBones). There is no .pab to name them after, and the
+  // archive names them several ways:
+  //
+  //   pgw_00_smallnom_0001.pac   pgw_smallnom_0001_stand_idle_00.paa
+  //   pgw_00_pla_0033.pac        pgw_00_pla_0033_stand_idle_01.paa
+  //   rh_01_wing_0001.pac        rh_wing_00_00_00_stand_idle_00.paa
+  //   m0538_marctanan_wing_0001  cs_pedu2_3h_00_m0538_00.paa  (the creature's
+  //                              own clips: the wing carries its whole rig)
+  //
+  // Every clip lives under MotionRoot, the class or creature's motion folder:
+  // character/model/<a>/<b>/... -> character/motion/<a>/<b>/. A creature's is
+  // small and is returned whole. A player class's holds thousands, so only
+  // clips carrying ItemWord as a '_'-separated part survive -- the first
+  // non-numeric part of the file name after the class prefix and the short
+  // code after it ("smallnom", "pla", "wing").
+  //
+  // Either way this is only a cheap pre-filter. The caller must still keep
+  // just the clips whose EVERY track names a bone of the rig: a weapon or pet
+  // rig is rooted at Bip01, so a clip touching any one of its bones would
+  // drag in hundreds of the class's own clips.
+  //
+  // Returns indices into vClipPaths.
+  std::vector<size_t> OwnRigClipCandidates(const std::string &sPacPath,
+                                           const std::vector<std::string> &vClipPaths);
+  std::string ItemWord(const std::string &sPacPath);
+  std::string MotionRoot(const std::string &sPacPath);
+
 }
 
 #endif

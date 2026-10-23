@@ -2608,6 +2608,24 @@ static bool LoadBestSkeleton(const std::vector<kukdh1::Tree *> &cands,
   return false;
 }
 
+// Names for a mesh's own bones, which its file does not store. Each candidate
+// rig is read and an id keeps the name its best-ranked rig gives it. Monster
+// wings recover nearly every name this way; a weapon usually only Bip01.
+static std::unordered_map<uint32_t, std::string> BorrowBoneNames(
+    const std::vector<kukdh1::Tree *> &cands, kukdh1::Crypt &cipher,
+    const std::wstring &wsTempDir) {
+  std::unordered_map<uint32_t, std::string> names;
+  const std::wstring temp = wsTempDir + L"paz_export_skel.pab";
+  for (kukdh1::Tree *n : cands) {
+    kukdh1::PabSkeleton s;
+    const bool okLoad = ExtractFile(temp, n->GetFileInfo(), cipher) && s.Load(temp);
+    DeleteFile(temp.c_str());
+    if (!okLoad) continue;
+    for (const auto &b : s.vBones) names.emplace(b.uiBoneId, b.sName);
+  }
+  return names;
+}
+
 // Every .paa clip belonging to a rig, matched by the prefix of the .pab's own
 // file name. Clips live under character/motion/ rather than character/model/,
 // so only the file name is matched.
@@ -2642,6 +2660,55 @@ static std::vector<kukdh1::Tree *> FindAnimationsFor(const std::string &sPabPath
   return out;
 }
 
+// The clips for a mesh bound to its own bone table. SkeletonMatch narrows the
+// archive to a handful of candidates; each is then read and kept only if every
+// one of its tracks names a bone of the rig. The looser any-track test the
+// exporters apply would accept hundreds of a class's clips here, because weapon
+// and pet rigs are rooted at Bip01 like the class itself.
+static std::vector<kukdh1::Tree *> FindOwnRigAnimations(const std::string &sPacPath,
+                                                        const kukdh1::PabSkeleton &skel,
+                                                        kukdh1::Crypt &cipher,
+                                                        uint64_t &ullTotalBytes) {
+  std::vector<kukdh1::Tree *> out;
+  ullTotalBytes = 0;
+
+  std::vector<kukdh1::Tree *> nodes;
+  std::vector<std::string> paths;
+  for (kukdh1::Tree *n : GetCachedFileNodes()) {
+    const std::string &p = n->GetFileInfo().sFullPath;
+    if (p.size() < 5 || p.compare(p.size() - 4, 4, ".paa") != 0) continue;
+    nodes.push_back(n);
+    paths.push_back(p);
+  }
+
+  WCHAR tempDir[MAX_PATH];
+  GetTempPath(MAX_PATH, tempDir);
+  const std::wstring clipTemp = std::wstring(tempDir) + L"paz_export_clip.paa";
+
+  const std::vector<size_t> cands = kukdh1::OwnRigClipCandidates(sPacPath, paths);
+  for (size_t k = 0; k < cands.size(); k++) {
+    if (k % 8 == 0) {
+      WCHAR st[96];
+      swprintf_s(st, L"Matching animations %zu of %zu...", k + 1, cands.size());
+      SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)st);
+    }
+    kukdh1::Tree *n = nodes[cands[k]];
+    kukdh1::PaaAnimation anim;
+    const bool okLoad = ExtractFile(clipTemp, n->GetFileInfo(), cipher) && anim.Load(clipTemp);
+    DeleteFile(clipTemp.c_str());
+    if (!okLoad || anim.IsEmpty()) continue;
+
+    bool whole = true;
+    for (const auto &t : anim.vTracks)
+      if (skel.FindBoneById(t.uiBoneId) < 0) { whole = false; break; }
+    if (!whole) continue;
+
+    out.push_back(n);
+    ullTotalBytes += n->GetFileInfo().uiOriginalSize;
+  }
+  return out;
+}
+
 // Writes every animation clip belonging to a character next to its exported
 // mesh, one FBX per clip in a "<mesh>_animations" folder. Returns a sentence
 // to append to the export report; never fails the mesh export, since the mesh
@@ -2650,14 +2717,13 @@ static std::vector<kukdh1::Tree *> FindAnimationsFor(const std::string &sPabPath
 // Above kAnimConfirmLimit clips the user is asked first: a playable class has
 // a few thousand, which is several hundred megabytes and not what someone
 // exporting one creature expects.
-static std::wstring ExportCharacterAnimations(const std::string &sPabPath,
+static std::wstring ExportCharacterAnimations(const std::vector<kukdh1::Tree *> &clips,
+                                              uint64_t ullBytes,
                                               const kukdh1::PabSkeleton &skel,
                                               const std::wstring &wsMeshPath,
                                               kukdh1::Crypt &cipher) {
   constexpr size_t kAnimConfirmLimit = 25;
 
-  uint64_t ullBytes = 0;
-  std::vector<kukdh1::Tree *> clips = FindAnimationsFor(sPabPath, ullBytes);
   if (clips.empty()) return L"\r\n\r\nNo animation clips were found for this character.";
 
   if (clips.size() > kAnimConfirmLimit) {
@@ -2739,12 +2805,10 @@ static std::wstring ExportCharacterAnimations(const std::string &sPabPath,
 // Writes every clip belonging to a character into one .psa beside the .psk.
 // Unlike the FBX path this is a single file, because .psa stores the bone table
 // once and appends sequences, so there is no per-clip overhead to weigh up.
-static std::wstring ExportCharacterPsa(const std::string &sPabPath,
+static std::wstring ExportCharacterPsa(const std::vector<kukdh1::Tree *> &clips,
                                        const kukdh1::PabSkeleton &skel,
                                        const std::wstring &wsPskPath,
                                        kukdh1::Crypt &cipher) {
-  uint64_t ullBytes = 0;
-  std::vector<kukdh1::Tree *> clips = FindAnimationsFor(sPabPath, ullBytes);
   if (clips.empty()) return L"\r\n\r\nNo animation clips were found for this character.";
 
   WCHAR tempDir[MAX_PATH];
@@ -2890,15 +2954,66 @@ DWORD WINAPI ExportThread(LPVOID arg) {
     bool loaded = mesh.Load(tempPath);
     DeleteFile(tempPath.c_str());
 
-    if (!loaded || mesh.IsEmpty()) {
-      msg = L"The character mesh could not be parsed.\r\n\r\n"
-            L"Version 1 .pac files are not supported yet.";
+    if (mesh.bPlaceholder) {
+      msg = L"This mesh is empty: the file holds no geometry.\r\n\r\n"
+            L"The game uses files like this as placeholders to hide a part, "
+            L"so there is nothing to export.";
     }
-    else if (std::vector<kukdh1::Tree *> cands = SkeletonCandidatesFor(info.sFullPath);
-             !cands.empty()) {
+    else if (!loaded || mesh.IsEmpty()) {
+      msg = L"The character mesh could not be parsed.\r\n\r\n"
+            L"Please report the file name at "
+            L"https://github.com/sibercat/PAZ-Unpacker/issues";
+    }
+    else {
+      // A mesh that carries its own bones is bound to them. No archive rig
+      // covers one, and where a .pab does share a bone its bind pose can sit
+      // a metre away, so a .pab is never the better choice here. Its clips
+      // are named after the item rather than a .pab, so they are found
+      // differently too.
+      const bool ownRig = !mesh.vEmbeddedBones.empty();
+      std::vector<kukdh1::Tree *> cands = SkeletonCandidatesFor(info.sFullPath);
       kukdh1::PabSkeleton skel;
       std::string sSkelPath;
-      if (!LoadBestSkeleton(cands, mesh.UsedBoneIds(), cipher, tempDir, skel, sSkelPath)) {
+      size_t nBorrowed = 0, nOwnMissing = 0;
+      const std::vector<uint32_t> usedIds = mesh.UsedBoneIds();
+      if (ownRig) {
+        const auto names = BorrowBoneNames(cands, cipher, tempDir);
+        for (const auto &b : mesh.vEmbeddedBones) nBorrowed += names.count(b.uiBoneId);
+        kukdh1::PacEmbeddedSkeleton(mesh, names, skel);
+        for (uint32_t id : usedIds)
+          if (skel.FindBoneById(id) < 0) nOwnMissing++;
+      }
+      auto Clips = [&](uint64_t &ullBytes) {
+        return ownRig ? FindOwnRigAnimations(info.sFullPath, skel, cipher, ullBytes)
+                      : FindAnimationsFor(sSkelPath, ullBytes);
+      };
+      auto OwnRigNote = [&]() -> std::wstring {
+        if (!ownRig) return std::wstring();
+        WCHAR note[256];
+        swprintf_s(note, L"\r\n\r\nThis mesh carries its own skeleton. %zu of its "
+                         L"%zu bones are named after matching bones in nearby rigs; "
+                         L"the file names none, so the rest are numbered.",
+                   nBorrowed, skel.vBones.size());
+        return note;
+      };
+
+      if (nOwnMissing) {
+        // pcw_00_mgt_0033 and pkow_tail_01: a few vertices lean on bones
+        // neither their own table nor any archive rig contains.
+        WCHAR buf[320];
+        swprintf_s(buf, L"This mesh carries its own skeleton, but %zu of the %zu "
+                        L"bones its vertices are weighted to are missing from it, "
+                        L"and no skeleton in the archive has them either.\r\n\r\n"
+                        L"It cannot be skinned without them.",
+                   nOwnMissing, usedIds.size());
+        msg = buf;
+      }
+      else if (!ownRig && cands.empty()) {
+        msg = L"No matching .pab skeleton was found in the archive for this "
+              L"mesh, so it cannot be skinned.";
+      }
+      else if (!ownRig &&
+               !LoadBestSkeleton(cands, usedIds, cipher, tempDir, skel, sSkelPath)) {
         msg = L"Found a skeleton for this mesh but could not parse it.";
       }
       else {
@@ -2921,7 +3036,9 @@ DWORD WINAPI ExportThread(LPVOID arg) {
               mesh.TotalVertices(), mesh.TotalTriangles(),
               mesh.vSubmeshes.size(), skel.vBones.size(), nDiffuse, nNormal);
             msg = buf;
-            msg += ExportCharacterPsa(sSkelPath, skel, p->wsPath, cipher);
+            msg += OwnRigNote();
+            uint64_t ullBytes = 0;
+            msg += ExportCharacterPsa(Clips(ullBytes), skel, p->wsPath, cipher);
           } else {
             msg = err;
           }
@@ -2938,19 +3055,18 @@ DWORD WINAPI ExportThread(LPVOID arg) {
             mesh.TotalVertices(), mesh.TotalTriangles(),
             mesh.vSubmeshes.size(), skel.vBones.size(), nDiffuse, nNormal);
           msg = buf;
+          msg += OwnRigNote();
 
           // The clips are separate files in the archive, so a mesh on its own
           // arrives in an engine with nothing to play. Write them alongside it.
-          msg += ExportCharacterAnimations(sSkelPath, skel, p->wsPath, cipher);
+          uint64_t ullBytes = 0;
+          std::vector<kukdh1::Tree *> clips = Clips(ullBytes);
+          msg += ExportCharacterAnimations(clips, ullBytes, skel, p->wsPath, cipher);
         } else {
           msg = err;
         }
         }
       }
-    }
-    else {
-      msg = L"No matching .pab skeleton was found in the archive for this "
-            L"mesh, so it cannot be skinned.";
     }
   }
   else if (isSkeleton) {
@@ -3690,9 +3806,11 @@ void UpdatePreview(kukdh1::Tree *pTree) {
 
     auto model = std::make_unique<kukdh1::PamModel>();
     bool loaded = false;
+    bool placeholder = false;
     if (bCharacter) {
       kukdh1::PacModel pac;
       loaded = pac.Load(mTempPath) && kukdh1::PacToPamModel(pac, *model);
+      placeholder = pac.bPlaceholder;
     } else if (bCollision) {
       loaded = kukdh1::LoadCollisionMesh(mTempPath, *model);
     } else {
@@ -3701,7 +3819,9 @@ void UpdatePreview(kukdh1::Tree *pTree) {
     DeleteFile(mTempPath.c_str());
 
     if (!loaded || model->IsEmpty()) {
-      SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)L"Preview: unsupported model format");
+      SendMessage(app.hStatusBar, SB_SETTEXT, 2, (LPARAM)(placeholder
+        ? L"Preview: empty placeholder mesh, no geometry"
+        : L"Preview: unsupported model format"));
       return;
     }
 
